@@ -1,0 +1,11 @@
+[
+  {"name": "int16_gzip", "dtype": "int16", "shape": [7, 5], "chunks": [3, 2], "fill": -1, "endian": "little", "compressors": ["gzip"], "separator": "/", "dimension_names": ["y", null]},
+  {"name": "float32_big_crc", "dtype": "float32", "shape": [9, 10], "chunks": [4, 4], "fill": "NaN", "endian": "big", "compressors": ["crc32c"], "separator": "/"},
+  {"name": "float64_3d", "dtype": "float64", "shape": [5, 6, 3], "chunks": [2, 4, 2], "fill": "-Infinity", "endian": "little", "compressors": ["gzip", "crc32c"], "separator": "/", "dimension_names": ["z", "y", "x"]},
+  {"name": "uint64_dot", "dtype": "uint64", "shape": [10], "chunks": [3], "fill": 7, "endian": "little", "compressors": [], "separator": "."},
+  {"name": "int64_big", "dtype": "int64", "shape": [4, 4], "chunks": [4, 3], "fill": 0, "endian": "big", "compressors": ["gzip"], "separator": "/"},
+  {"name": "bool", "dtype": "bool", "shape": [4, 4], "chunks": [3, 3], "fill": false, "endian": null, "compressors": ["gzip"], "separator": "/"},
+  {"name": "uint8_plain", "dtype": "uint8", "shape": [3, 130], "chunks": [2, 64], "fill": 255, "endian": null, "compressors": [], "separator": "/"},
+  {"name": "int8_scalar", "dtype": "int8", "shape": [], "chunks": [], "fill": 0, "endian": null, "compressors": [], "separator": "/"},
+  {"name": "nested/uint32", "dtype": "uint32", "shape": [6, 6], "chunks": [6, 6], "fill": 1, "endian": "little", "compressors": ["crc32c"], "separator": "/"}
+]
