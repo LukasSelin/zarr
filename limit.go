@@ -77,7 +77,7 @@ func encodedBound(c ArrayBytesCodec, spec ChunkSpec) int64 {
 // bytesBound is the most bytes a bytes-to-bytes codec can encode n bytes to,
 // or unbounded for a codec this package does not know.
 func bytesBound(c BytesBytesCodec, n int64) int64 {
-	switch c.(type) {
+	switch c := c.(type) {
 	case CRC32CCodec:
 		return n + 4
 	case GzipCodec:
@@ -85,6 +85,10 @@ func bytesBound(c BytesBytesCodec, n int64) int64 {
 		// header and trailer 18 and whatever names and comments a writer puts
 		// in. This is well above both.
 		return n + n/100 + 1024
+	case BoundedBytesEncoder:
+		if b := c.EncodedBound(n); b >= 0 {
+			return b
+		}
 	}
 	return unbounded
 }

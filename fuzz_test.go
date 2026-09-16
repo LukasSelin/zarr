@@ -325,7 +325,7 @@ func FuzzGzipCodec(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte, limit uint32) {
 		checkAllocated(t, len(data), func() {
 			l := int64(limit % (1 << 17))
-			out, err := GzipCodec{}.decodeBytesLimit(data, l)
+			out, err := GzipCodec{}.DecodeBytesLimit(data, l)
 			if err == nil && int64(len(out)) > l {
 				t.Fatalf("inflated to %d bytes, past a limit of %d", len(out), l)
 			}

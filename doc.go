@@ -14,8 +14,9 @@
 //   - the default and v2 chunk key encodings;
 //   - the codecs bytes, gzip, crc32c and sharding_indexed.
 //
-// Other codecs can be registered with RegisterCodec - zstd, for one, which
-// the standard library does not have. Not yet here: transpose, float16,
+// Other codecs can be registered with RegisterCodec. zstd, which the
+// standard library does not have, is in the module
+// github.com/LukasSelin/zarr/zstd. Not yet here: transpose, float16,
 // complex and raw data types, storage transformers.
 //
 // Arrays are read and written with the generic functions Read, Write,
