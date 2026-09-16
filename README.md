@@ -36,7 +36,8 @@ row, err := zarr.Read[float32](ctx, h, []int{100, 0}, []int{1, 1024})
 | `default` and `v2` chunk key encodings, `/` or `.` | yes |
 | `bytes` codec, either endian | yes |
 | `gzip`, `crc32c` codecs | yes |
-| `zstd`, `blosc` | not in the standard library; register one with `RegisterCodec` |
+| `zstd` | in [`zstd`](zstd), a module of its own |
+| `blosc` | not in the standard library; register one with `RegisterCodec` |
 | `transpose` codec | no |
 | `sharding_indexed` codec, index at either end | yes: `ArrayOptions.ShardShape`, or a `ShardingCodec` of your own |
 | Extensions with `must_understand: false` | ignored, as the specification allows |
@@ -86,6 +87,24 @@ rather than fill: grant it along with `s3:GetObject`. Both modules build
 with Go 1.23; the S3 module holds `aws-sdk-go-v2/service/s3` at v1.96.2, the
 last before it asked for Go 1.24, and a program that requires a later one
 gets that.
+
+## zstd
+
+zstd is not in the standard library, so its codec is a module of its own,
+[`github.com/LukasSelin/zarr/zstd`](zstd), with the pure Go compressor of
+[klauspost/compress](https://github.com/klauspost/compress). Importing it
+registers the codec, so arrays that use zstd open:
+
+```go
+import zstd "github.com/LukasSelin/zarr/zstd"
+
+Codecs: []zarr.Codec{zarr.BytesCodec{Endian: zarr.Little}, zstd.Codec{Level: 3}},
+```
+
+A zstd chunk is held to what a gzip chunk is. A codec of your own can be
+too: one that is a `LimitedBytesDecoder` is told the most a chunk may
+decode to, and one that is a `BoundedBytesEncoder` says the most it
+encodes to, for the codecs after it.
 
 ## Shards
 

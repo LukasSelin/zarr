@@ -174,8 +174,8 @@ func (p pipeline) encode(chunk any, spec ChunkSpec) ([]byte, error) {
 func (p pipeline) decode(b []byte, spec ChunkSpec) (any, error) {
 	var err error
 	for i := len(p.bytes) - 1; i >= 0; i-- {
-		if l, ok := p.bytes[i].(limitedDecoder); ok {
-			b, err = l.decodeBytesLimit(b, p.decodeLimit(spec, i))
+		if l, ok := p.bytes[i].(LimitedBytesDecoder); ok {
+			b, err = l.DecodeBytesLimit(b, p.decodeLimit(spec, i))
 		} else {
 			b, err = p.bytes[i].DecodeBytes(b)
 		}
@@ -203,10 +203,20 @@ func (p pipeline) decodeLimit(spec ChunkSpec, i int) int64 {
 	return n
 }
 
-// limitedDecoder is a bytes-to-bytes codec that can be told the most bytes
-// it may decode to, and fails rather than decode to more.
-type limitedDecoder interface {
-	decodeBytesLimit(data []byte, limit int64) ([]byte, error)
+// LimitedBytesDecoder is a bytes-to-bytes codec that can be told the most
+// bytes it may decode to, and fails rather than decode to more. An array
+// tells it what the codecs before it encode a chunk to at most; a
+// decompressor from a store that is not trusted should be one.
+type LimitedBytesDecoder interface {
+	DecodeBytesLimit(data []byte, limit int64) ([]byte, error)
+}
+
+// BoundedBytesEncoder is a bytes-to-bytes codec that can say the most bytes
+// it encodes n bytes to, or a negative number if it cannot. A codec that is
+// not one is taken to encode to any number, which lets a limited decoder
+// after it inflate a chunk as far as a chunk may be.
+type BoundedBytesEncoder interface {
+	EncodedBound(n int64) int64
 }
 
 // Endian is the byte order of the bytes codec.
@@ -354,10 +364,10 @@ func (c GzipCodec) EncodeBytes(data []byte) ([]byte, error) {
 // DecodeBytes inflates data, to no more bytes than a chunk may be. An array
 // holds it to the bytes its chunks encode to.
 func (c GzipCodec) DecodeBytes(data []byte) ([]byte, error) {
-	return c.decodeBytesLimit(data, maxStoredBytes)
+	return c.DecodeBytesLimit(data, maxStoredBytes)
 }
 
-func (GzipCodec) decodeBytesLimit(data []byte, limit int64) ([]byte, error) {
+func (GzipCodec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 	r, _ := gzipReaders.Get().(*gzip.Reader)
 	var err error
 	if r != nil {
