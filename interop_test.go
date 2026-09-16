@@ -39,7 +39,7 @@ type interopCase struct {
 	} `json:"sharding"`
 }
 
-func interopCases(t *testing.T) []interopCase {
+func interopCases(t testing.TB) []interopCase {
 	b, err := os.ReadFile(filepath.Join("testdata", "interop", "cases.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func interopValue[T Element](i int) T {
 	return v.(T)
 }
 
-func interopData[T Element](t *testing.T, c interopCase) []T {
+func interopData[T Element](t testing.TB, c interopCase) []T {
 	fill, err := parseFill(c.DataType, c.Fill)
 	if err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ func checkInterop[T Element](t *testing.T, s Store, c interopCase) {
 	}
 }
 
-func writeInterop[T Element](t *testing.T, s Store, c interopCase) {
+func writeInterop[T Element](t testing.TB, s Store, c interopCase) {
 	codecs := []Codec{BytesCodec{Endian: c.Endian}}
 	for _, name := range c.Compressors {
 		if name == "gzip" {
@@ -246,7 +246,7 @@ func TestZarrPython(t *testing.T) {
 
 // dispatch calls the one of fs for the case's data type, in the order of the
 // DataType constants.
-func dispatch(t *testing.T, c interopCase, fs ...func()) {
+func dispatch(t testing.TB, c interopCase, fs ...func()) {
 	for i, d := range []DataType{Bool, Int8, Int16, Int32, Int64, Uint8, Uint16, Uint32, Uint64, Float32, Float64} {
 		if d == c.DataType {
 			fs[i]()
