@@ -312,8 +312,10 @@ func ReadChunk[T Element](ctx context.Context, a *Array, idx []int) ([]T, error)
 	return read(minus(idx, times(sidx, a.perShard)))
 }
 
-// WriteChunk writes the whole chunk at idx: data is chunk shape long. In a
-// sharded array the rest of the chunk's shard is read and written back.
+// WriteChunk writes the whole chunk at idx: data is chunk shape long. The
+// part of it past the end of the array is kept as the fill value, whatever
+// data holds there, so that growing the array later reads fill. In a sharded
+// array the rest of the chunk's shard is read and written back.
 func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) error {
 	if err := checkType[T](a); err != nil {
 		return err
@@ -325,7 +327,7 @@ func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) e
 		return fmt.Errorf("zarr: chunk of %d elements, not %d", len(data), product(a.chunks))
 	}
 	if a.shard == nil {
-		return writeStored(ctx, a, idx, data)
+		return writeStored(ctx, a, idx, data, false)
 	}
 	sidx := a.shardOf(idx)
 	buf, err := readStored[T](ctx, a, sidx)
@@ -334,7 +336,7 @@ func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) e
 	}
 	at := times(minus(idx, times(sidx, a.perShard)), a.chunks)
 	copyBlock(buf, a.grid, at, data, a.chunks, make([]int, len(idx)), a.chunks)
-	return writeStored(ctx, a, sidx, buf)
+	return writeStored(ctx, a, sidx, buf, true)
 }
 
 func (a *Array) storedSpec() ChunkSpec {
@@ -367,8 +369,12 @@ func asChunk[T Element](v any, n int, key string) ([]T, error) {
 }
 
 // writeStored encodes and writes the whole of the stored object at sidx, or
-// deletes it if it is nothing but fill.
-func writeStored[T Element](ctx context.Context, a *Array, sidx []int, data []T) error {
+// deletes it if it is nothing but fill. What of it is past the end of the
+// array is written as fill, in data itself if owned and in a copy otherwise:
+// no stored object holds anything past the end, which is what lets an array
+// grow without reading one.
+func writeStored[T Element](ctx context.Context, a *Array, sidx []int, data []T, owned bool) error {
+	data = fillPastEnd(a, sidx, data, owned)
 	key := a.storedKey(sidx)
 	if !a.WriteEmptyChunks && allFill(data, a.fill.(T)) {
 		return a.store.Delete(ctx, key)
@@ -599,7 +605,7 @@ func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []
 			return err
 		}
 		copyBlock(buf, a.grid, minus(at, times(sidx, a.grid)), data, shape, minus(at, start), n)
-		return writeStored(ctx, a, sidx, buf)
+		return writeStored(ctx, a, sidx, buf, true)
 	})
 }
 

@@ -57,6 +57,12 @@ var (
 	ErrUnsupported = errors.New("zarr: unsupported")
 )
 
+// ValidKey refuses keys that could reach outside a store: empty ones, ones
+// beginning or ending in a slash, and ones with an empty, "." or ".."
+// segment, a backslash or a colon. A Store kept elsewhere should refuse to
+// Set what this refuses.
+func ValidKey(key string) error { return checkKey(key) }
+
 // checkKey refuses keys that could reach outside a store.
 func checkKey(key string) error {
 	if key == "" || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") || strings.ContainsAny(key, "\\:") {
