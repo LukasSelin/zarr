@@ -45,6 +45,48 @@ row, err := zarr.Read[float32](ctx, h, []int{100, 0}, []int{1, 1024})
 Chunks that hold nothing but the fill value are deleted rather than
 written, as zarr-python does; set `Array.WriteEmptyChunks` to keep them.
 
+## Growing an array
+
+`Append` writes after the end of an array along one axis and grows it;
+`Resize` sets its shape outright:
+
+```go
+fwi, _ := root.CreateArray(ctx, "fwi", zarr.ArrayOptions{
+	Shape:      []int{0, 250, 620}, // time, y, x
+	ChunkShape: []int{32, 250, 620},
+	DataType:   zarr.Float32,
+	FillValue:  math.NaN(),
+})
+day, err := zarr.Append(ctx, fwi, 0, grid) // grid is 250 by 620 long
+```
+
+`Append` writes the chunks before the metadata, so one that fails part way
+leaves the shape as it was. Growing writes nothing but the metadata: no
+chunk holds anything past the end of its array, `WriteChunk` included, so
+what is past the old end reads as fill. Shrinking deletes the chunks past
+the new end and fills the ones it cuts through before writing the metadata.
+A handle on the array keeps its shape until `Refresh`, and nothing stops two
+writers growing one array at once: one of them would lose.
+
+## Stores in S3
+
+`github.com/LukasSelin/zarr/s3` is a module of its own, so that the core
+needs nothing past the standard library. Its `Store` is a `RangeGetter`: a
+sharded array is read a shard's index and the chunks it needs at a time,
+and a shard's index at its end is one request.
+
+```go
+cfg, _ := config.LoadDefaultConfig(ctx)
+s := s3.New(awss3.NewFromConfig(cfg), "my-bucket", "fwi.zarr")
+```
+
+S3 answers a read of a key that is not there with 403 rather than 404 unless
+the reader may `s3:ListBucket`, and a chunk never written is then an error
+rather than fill: grant it along with `s3:GetObject`. Both modules build
+with Go 1.23; the S3 module holds `aws-sdk-go-v2/service/s3` at v1.96.2, the
+last before it asked for Go 1.24, and a program that requires a later one
+gets that.
+
 ## Shards
 
 One object a chunk is a great many files at scale: a 16 000 by 8 000 map in
