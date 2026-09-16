@@ -32,6 +32,11 @@ type interopCase struct {
 	Compressors    []string        `json:"compressors"`
 	Separator      string          `json:"separator"`
 	DimensionNames []*string       `json:"dimension_names"`
+	Sharding       *struct {
+		Shape         []int         `json:"shape"`
+		IndexLocation IndexLocation `json:"index_location"`
+		After         []string      `json:"after"`
+	} `json:"sharding"`
 }
 
 func interopCases(t *testing.T) []interopCase {
@@ -119,6 +124,11 @@ func checkInterop[T Element](t *testing.T, s Store, c interopCase) {
 	if !slices.Equal(a.ChunkShape(), c.Chunks) {
 		t.Errorf("%s: chunks %v", c.Name, a.ChunkShape())
 	}
+	if c.Sharding != nil {
+		if !slices.Equal(a.ShardShape(), c.Sharding.Shape) || a.shard.location() != c.Sharding.IndexLocation {
+			t.Errorf("%s: shards %v, index at the %s", c.Name, a.ShardShape(), a.shard.location())
+		}
+	}
 	if c.DimensionNames != nil {
 		want := make([]string, len(c.DimensionNames))
 		for i, n := range c.DimensionNames {
@@ -141,6 +151,14 @@ func writeInterop[T Element](t *testing.T, s Store, c interopCase) {
 			codecs = append(codecs, CRC32CCodec{})
 		}
 	}
+	grid := c.Chunks
+	if c.Sharding != nil {
+		codecs = []Codec{&ShardingCodec{ChunkShape: c.Chunks, Codecs: codecs, IndexLocation: c.Sharding.IndexLocation}}
+		for range c.Sharding.After {
+			codecs = append(codecs, GzipCodec{Level: 5})
+		}
+		grid = c.Sharding.Shape
+	}
 	fill, err := parseFill(c.DataType, c.Fill)
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +179,7 @@ func writeInterop[T Element](t *testing.T, s Store, c interopCase) {
 		}
 	}
 	a, err := CreateArray(ctx, s, c.Name, ArrayOptions{
-		Shape: c.Shape, ChunkShape: c.Chunks, DataType: c.DataType, FillValue: fill,
+		Shape: c.Shape, ChunkShape: grid, DataType: c.DataType, FillValue: fill,
 		Codecs: codecs, Separator: c.Separator, DimensionNames: names,
 	})
 	if err != nil {

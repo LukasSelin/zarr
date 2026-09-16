@@ -39,12 +39,33 @@ row, err := zarr.Read[float32](ctx, h, []int{100, 0}, []int{1, 1024})
 | `gzip`, `crc32c` codecs | yes |
 | `zstd`, `blosc` | not in the standard library; register one with `RegisterCodec` |
 | `transpose` codec | no |
-| `sharding_indexed` codec | no - next; one file a chunk is many files at scale |
+| `sharding_indexed` codec, index at either end | yes: `ArrayOptions.ShardShape`, or a `ShardingCodec` of your own |
 | Extensions with `must_understand: false` | ignored, as the specification allows |
 | Storage transformers | refused |
 
 Chunks that hold nothing but the fill value are deleted rather than
 written, as zarr-python does; set `Array.WriteEmptyChunks` to keep them.
+
+## Shards
+
+One object a chunk is a great many files at scale: a 16 000 by 8 000 map in
+chunks of 64 is 31 250 of them for every field. A sharded array keeps many
+chunks in one object, with an index of where each is:
+
+```go
+h, _ := root.CreateArray(ctx, "height", zarr.ArrayOptions{
+	Shape:      []int{8000, 16000},
+	ChunkShape: []int{64, 64},   // what is read and written
+	ShardShape: []int{1024, 1024}, // what is stored: 256 chunks each
+	DataType:   zarr.Float32,
+	Codecs:     []zarr.Codec{zarr.BytesCodec{Endian: zarr.Little}, zarr.GzipCodec{Level: 5}},
+})
+```
+
+`Read` from a store that is a `RangeGetter` - `DirStore` and `MemoryStore`
+both are - reads a shard's index and then only the chunks it needs. `Write`
+writes whole shards, as zarr-python does: a region that covers part of a
+shard reads the rest of it and writes it all back.
 
 ## Against zarr-python
 
@@ -52,8 +73,9 @@ written, as zarr-python does; set `Array.WriteEmptyChunks` to keep them.
 `testdata/interop/cases.json` for this package to read, and reads back with
 zarr-python every case this package writes: every data type, both endians,
 gzip and crc32c alone and together, NaN and infinite fills, both
-separators, a scalar, a nested group, dimension names and a `uint64`
-attribute. It is skipped unless `ZARR_PYTHON` names a Python with `zarr`
+separators, a scalar, a nested group, dimension names, a `uint64`
+attribute, and shards with the index at the end, at the start, and with a
+codec after the shard. It is skipped unless `ZARR_PYTHON` names a Python with `zarr`
 and `numpy`:
 
 ```sh

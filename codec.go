@@ -23,12 +23,24 @@ type Codec interface {
 }
 
 // ArrayBytesCodec turns a chunk's elements - a []T in an any, T being the
-// array's data type - into bytes and back.
+// array's data type, in C order - into bytes and back.
 type ArrayBytesCodec interface {
 	Codec
-	EncodeArray(chunk any, d DataType) ([]byte, error)
-	// DecodeArray returns n elements of type d, as a []T in an any.
-	DecodeArray(data []byte, d DataType, n int) (any, error)
+	EncodeArray(chunk any, spec ChunkSpec) ([]byte, error)
+	// DecodeArray returns the elements of a chunk of spec's shape, as a []T
+	// in an any.
+	DecodeArray(data []byte, spec ChunkSpec) (any, error)
+}
+
+// ChunkSpec is what a codec is told of the chunk it encodes or decodes.
+type ChunkSpec struct {
+	Shape    []int
+	DataType DataType
+	// Fill is the array's fill value, of the Go type of DataType.
+	Fill any
+	// WriteEmptyChunks is the array's: whether a codec that holds several
+	// chunks keeps those that are nothing but the fill value.
+	WriteEmptyChunks bool
 }
 
 // BytesBytesCodec turns bytes into bytes: a compressor, a checksum.
@@ -60,6 +72,7 @@ func RegisterCodec(name string, parse CodecParser) {
 func init() {
 	RegisterCodec("bytes", parseBytes)
 	RegisterCodec("gzip", parseGzip)
+	RegisterCodec("sharding_indexed", parseSharding)
 	RegisterCodec("crc32c", func(json.RawMessage, DataType) (Codec, error) { return CRC32CCodec{}, nil })
 }
 
@@ -92,34 +105,63 @@ type pipeline struct {
 }
 
 func newPipeline(named []Named, d DataType) (pipeline, error) {
-	var p pipeline
+	cs := make([]Codec, len(named))
 	for i, n := range named {
 		c, err := parseCodec(n, d)
 		if err != nil {
-			return p, err
+			return pipeline{}, err
 		}
+		cs[i] = c
+	}
+	return pipelineOf(cs)
+}
+
+func pipelineOf(cs []Codec) (pipeline, error) {
+	var p pipeline
+	for i, c := range cs {
 		if i == 0 {
 			ab, ok := c.(ArrayBytesCodec)
 			if !ok {
-				return p, fmt.Errorf("%w: codec %q first: only array-to-bytes codecs may begin a pipeline here", ErrUnsupported, n.Name)
+				return p, fmt.Errorf("%w: codec %q first: only array-to-bytes codecs may begin a pipeline here", ErrUnsupported, c.Name())
 			}
 			p.array = ab
 			continue
 		}
 		bb, ok := c.(BytesBytesCodec)
 		if !ok {
-			return p, fmt.Errorf("zarr: codec %q after the array-to-bytes codec must be bytes-to-bytes", n.Name)
+			return p, fmt.Errorf("zarr: codec %q after the array-to-bytes codec must be bytes-to-bytes", c.Name())
 		}
 		p.bytes = append(p.bytes, bb)
 	}
 	if p.array == nil {
-		return p, fmt.Errorf("zarr: an array needs an array-to-bytes codec")
+		return p, fmt.Errorf("zarr: a pipeline needs an array-to-bytes codec")
 	}
 	return p, nil
 }
 
-func (p pipeline) encode(chunk any, d DataType) ([]byte, error) {
-	b, err := p.array.EncodeArray(chunk, d)
+// codecs is the pipeline as the list it was made from.
+func (p pipeline) codecs() []Codec {
+	cs := []Codec{p.array}
+	for _, c := range p.bytes {
+		cs = append(cs, c)
+	}
+	return cs
+}
+
+func namedCodecs(cs []Codec) ([]Named, error) {
+	named := make([]Named, len(cs))
+	for i, c := range cs {
+		n, err := namedCodec(c)
+		if err != nil {
+			return nil, err
+		}
+		named[i] = n
+	}
+	return named, nil
+}
+
+func (p pipeline) encode(chunk any, spec ChunkSpec) ([]byte, error) {
+	b, err := p.array.EncodeArray(chunk, spec)
 	for _, c := range p.bytes {
 		if err != nil {
 			break
@@ -129,14 +171,14 @@ func (p pipeline) encode(chunk any, d DataType) ([]byte, error) {
 	return b, err
 }
 
-func (p pipeline) decode(b []byte, d DataType, n int) (any, error) {
+func (p pipeline) decode(b []byte, spec ChunkSpec) (any, error) {
 	var err error
 	for i := len(p.bytes) - 1; i >= 0; i-- {
 		if b, err = p.bytes[i].DecodeBytes(b); err != nil {
 			return nil, err
 		}
 	}
-	return p.array.DecodeArray(b, d, n)
+	return p.array.DecodeArray(b, spec)
 }
 
 // Endian is the byte order of the bytes codec.
@@ -196,15 +238,16 @@ func (c BytesCodec) order(d DataType) (binary.ByteOrder, error) {
 	return nil, fmt.Errorf("zarr: bytes codec: no such endian %q", c.Endian)
 }
 
-func (c BytesCodec) EncodeArray(chunk any, d DataType) ([]byte, error) {
-	order, err := c.order(d)
+func (c BytesCodec) EncodeArray(chunk any, spec ChunkSpec) ([]byte, error) {
+	order, err := c.order(spec.DataType)
 	if err != nil {
 		return nil, err
 	}
 	return binary.Append(nil, order, chunk)
 }
 
-func (c BytesCodec) DecodeArray(data []byte, d DataType, n int) (any, error) {
+func (c BytesCodec) DecodeArray(data []byte, spec ChunkSpec) (any, error) {
+	d, n := spec.DataType, product(spec.Shape)
 	order, err := c.order(d)
 	if err != nil {
 		return nil, err

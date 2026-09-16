@@ -24,6 +24,28 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// RangeGetter is a Store that can read part of a value. A sharded array
+// read from one fetches the index of a shard and the chunks it needs rather
+// than the whole shard.
+type RangeGetter interface {
+	// GetRange returns length bytes of the value under key from offset,
+	// where a negative offset counts back from the end. It returns an error
+	// wrapping ErrNotFound for a key it does not hold, and an error for a
+	// range that runs past either end.
+	GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error)
+}
+
+// span is where offset and length fall in a value of size bytes.
+func span(key string, size, offset, length int64) (int64, error) {
+	if offset < 0 {
+		offset += size
+	}
+	if offset < 0 || length < 0 || offset+length > size {
+		return 0, fmt.Errorf("zarr: range %d+%d is outside %s, of %d bytes", offset, length, key, size)
+	}
+	return offset, nil
+}
+
 var (
 	// ErrNotFound is what a Store returns for a key it does not hold, and
 	// what opening a node that is not there wraps.
@@ -70,6 +92,23 @@ func (s *MemoryStore) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
 	return append([]byte(nil), v...), nil
+}
+
+func (s *MemoryStore) GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.m[key]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	at, err := span(key, int64(len(v)), offset, length)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), v[at:at+length]...), nil
 }
 
 func (s *MemoryStore) Set(ctx context.Context, key string, value []byte) error {
@@ -137,6 +176,37 @@ func (s *DirStore) Get(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
 	}
 	return b, err
+}
+
+func (s *DirStore) GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p, err := s.path(key)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	at, err := span(key, info.Size(), offset, length)
+	if err != nil {
+		return nil, err
+	}
+	b := make([]byte, length)
+	if _, err := f.ReadAt(b, at); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // Set writes to a file beside the key's and renames it into place, so that

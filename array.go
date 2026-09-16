@@ -5,21 +5,33 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
 
 // Array is an array in a store.
 type Array struct {
-	store  Store
-	path   string
-	meta   ArrayMetadata
-	chunks []int
-	keys   keyEncoding
+	store Store
+	path  string
+	meta  ArrayMetadata
+	keys  keyEncoding
+	fill  any
+	// codecs is the whole pipeline, which a stored object - a chunk, or a
+	// shard - is encoded through.
 	codecs pipeline
-	fill   any
+	// grid is the shape of a stored object: the chunk_grid of the metadata.
+	// chunks is the shape of a chunk read or written, which is grid unless
+	// the array is sharded; perShard is how many chunks one stored object
+	// holds along each dimension.
+	grid, chunks, perShard []int
+	// shard is the sharding codec of a sharded array, and indexSize the
+	// length of a shard's index; nil and 0 otherwise.
+	shard     *ShardingCodec
+	indexSize int
 	// WriteEmptyChunks keeps a chunk that holds nothing but the fill value.
-	// By default such a chunk is deleted instead; it reads as the fill value
+	// By default such a chunk is not stored; it reads as the fill value
 	// either way.
 	WriteEmptyChunks bool
 }
@@ -28,6 +40,10 @@ type Array struct {
 type ArrayOptions struct {
 	Shape      []int
 	ChunkShape []int
+	// ShardShape, if set, keeps the chunks in shards of this shape, each a
+	// whole number of chunks along every dimension; Codecs are then the
+	// codecs of each chunk within a shard. See ShardingCodec.
+	ShardShape []int
 	DataType   DataType
 	// FillValue is what an element nobody wrote reads as. Nil is zero; a Go
 	// number of another type is taken if the data type holds it exactly.
@@ -61,22 +77,23 @@ func CreateArray(ctx context.Context, s Store, path string, o ArrayOptions) (*Ar
 	if o.Separator == "" {
 		o.Separator = "/"
 	}
-	grid, _ := json.Marshal(map[string][]int{"chunk_shape": o.ChunkShape})
+	grid := o.ChunkShape
+	if o.ShardShape != nil {
+		o.Codecs = []Codec{&ShardingCodec{ChunkShape: o.ChunkShape, Codecs: o.Codecs}}
+		grid = o.ShardShape
+	}
+	gridJSON, _ := json.Marshal(map[string][]int{"chunk_shape": grid})
 	m := ArrayMetadata{
 		ZarrFormat:       3,
 		NodeType:         "array",
 		Shape:            append([]int{}, o.Shape...),
 		DataType:         o.DataType,
-		ChunkGrid:        Named{Name: "regular", Configuration: grid},
+		ChunkGrid:        Named{Name: "regular", Configuration: gridJSON},
 		ChunkKeyEncoding: keyEncoding{sep: o.Separator}.named(),
 		FillValue:        formatFill(fill),
 	}
-	for _, c := range o.Codecs {
-		n, err := namedCodec(c)
-		if err != nil {
-			return nil, err
-		}
-		m.Codecs = append(m.Codecs, n)
+	if m.Codecs, err = namedCodecs(o.Codecs); err != nil {
+		return nil, err
 	}
 	if o.DimensionNames != nil {
 		for _, name := range o.DimensionNames {
@@ -129,13 +146,13 @@ func newArray(s Store, path string, m ArrayMetadata) (*Array, error) {
 	if err := json.Unmarshal(m.ChunkGrid.Configuration, &grid); err != nil {
 		return nil, bad("chunk grid: %v", err)
 	}
-	a.chunks = grid.ChunkShape
-	if len(a.chunks) != len(m.Shape) {
-		return nil, bad("shape %v and chunk shape %v differ in dimensions", m.Shape, a.chunks)
+	a.grid = grid.ChunkShape
+	if len(a.grid) != len(m.Shape) {
+		return nil, bad("shape %v and chunk shape %v differ in dimensions", m.Shape, a.grid)
 	}
 	for k := range m.Shape {
-		if m.Shape[k] < 0 || a.chunks[k] <= 0 {
-			return nil, bad("shape %v, chunk shape %v", m.Shape, a.chunks)
+		if m.Shape[k] < 0 || a.grid[k] <= 0 {
+			return nil, bad("shape %v, chunk shape %v", m.Shape, a.grid)
 		}
 	}
 	if m.DimensionNames != nil && len(m.DimensionNames) != len(m.Shape) {
@@ -151,17 +168,38 @@ func newArray(s Store, path string, m ArrayMetadata) (*Array, error) {
 	if a.codecs, err = newPipeline(m.Codecs, m.DataType); err != nil {
 		return nil, err
 	}
+	a.chunks, a.perShard = a.grid, slices.Repeat([]int{1}, len(a.grid))
+	if sc, ok := a.codecs.array.(*ShardingCodec); ok {
+		a.shard, a.chunks = sc, sc.ChunkShape
+		if a.perShard, err = sc.perShard(a.grid); err != nil {
+			return nil, bad("%v", err)
+		}
+		if a.indexSize, err = sc.indexSize(a.perShard); err != nil {
+			return nil, err
+		}
+	}
 	return a, nil
 }
 
 func (a *Array) Path() string            { return a.path }
 func (a *Array) DataType() DataType      { return a.meta.DataType }
-func (a *Array) Shape() []int            { return append([]int{}, a.meta.Shape...) }
-func (a *Array) ChunkShape() []int       { return append([]int{}, a.chunks...) }
+func (a *Array) Shape() []int            { return slices.Clone(a.meta.Shape) }
 func (a *Array) FillValue() any          { return a.fill }
 func (a *Array) Metadata() ArrayMetadata { return a.meta }
 func (a *Array) Attribute(name string, v any) (bool, error) {
 	return attribute(a.meta.Attributes, name, v)
+}
+
+// ChunkShape is the shape of a chunk: of the chunks within a shard, if the
+// array is sharded.
+func (a *Array) ChunkShape() []int { return slices.Clone(a.chunks) }
+
+// ShardShape is the shape of a shard, or nil if the array is not sharded.
+func (a *Array) ShardShape() []int {
+	if a.shard == nil {
+		return nil
+	}
+	return slices.Clone(a.grid)
 }
 
 // DimensionNames is the name of each dimension, "" where it has none, or nil
@@ -204,8 +242,20 @@ func (a *Array) SetAttributes(ctx context.Context, attrs map[string]any) error {
 	return nil
 }
 
-// ChunkKey is the store key of the chunk at idx.
-func (a *Array) ChunkKey(idx []int) string { return join(a.path, a.keys.key(idx)) }
+// ChunkKey is the store key the chunk at idx is kept under: its own, or its
+// shard's.
+func (a *Array) ChunkKey(idx []int) string { return a.storedKey(a.shardOf(idx)) }
+
+func (a *Array) storedKey(sidx []int) string { return join(a.path, a.keys.key(sidx)) }
+
+// shardOf is the index of the stored object the chunk at idx is in.
+func (a *Array) shardOf(idx []int) []int {
+	s := make([]int, len(idx))
+	for k := range idx {
+		s[k] = idx[k] / a.perShard[k]
+	}
+	return s
+}
 
 func product(s []int) int {
 	n := 1
@@ -245,30 +295,16 @@ func ReadChunk[T Element](ctx context.Context, a *Array, idx []int) ([]T, error)
 	if err := a.checkChunk(idx); err != nil {
 		return nil, err
 	}
-	return readChunk[T](ctx, a, idx)
-}
-
-func readChunk[T Element](ctx context.Context, a *Array, idx []int) ([]T, error) {
-	n := product(a.chunks)
-	b, err := a.store.Get(ctx, a.ChunkKey(idx))
-	if errors.Is(err, ErrNotFound) {
-		return filled(n, a.fill.(T)), nil
-	}
+	sidx := a.shardOf(idx)
+	read, err := openStored[T](ctx, a, sidx)
 	if err != nil {
 		return nil, err
 	}
-	v, err := a.codecs.decode(b, a.meta.DataType, n)
-	if err != nil {
-		return nil, fmt.Errorf("zarr: chunk %s: %w", a.ChunkKey(idx), err)
-	}
-	s, ok := v.([]T)
-	if !ok || len(s) != n {
-		return nil, fmt.Errorf("zarr: chunk %s decoded to %T of %d", a.ChunkKey(idx), v, len(s))
-	}
-	return s, nil
+	return read(minus(idx, times(sidx, a.perShard)))
 }
 
-// WriteChunk writes the whole chunk at idx: data is chunk shape long.
+// WriteChunk writes the whole chunk at idx: data is chunk shape long. In a
+// sharded array the rest of the chunk's shard is read and written back.
 func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) error {
 	if err := checkType[T](a); err != nil {
 		return err
@@ -279,19 +315,124 @@ func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) e
 	if len(data) != product(a.chunks) {
 		return fmt.Errorf("zarr: chunk of %d elements, not %d", len(data), product(a.chunks))
 	}
-	return writeChunk(ctx, a, idx, data)
+	if a.shard == nil {
+		return writeStored(ctx, a, idx, data)
+	}
+	sidx := a.shardOf(idx)
+	buf, err := readStored[T](ctx, a, sidx)
+	if err != nil {
+		return err
+	}
+	at := times(minus(idx, times(sidx, a.perShard)), a.chunks)
+	copyBlock(buf, a.grid, at, data, a.chunks, make([]int, len(idx)), a.chunks)
+	return writeStored(ctx, a, sidx, buf)
 }
 
-func writeChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) error {
-	key := a.ChunkKey(idx)
+func (a *Array) storedSpec() ChunkSpec {
+	return ChunkSpec{Shape: a.grid, DataType: a.meta.DataType, Fill: a.fill, WriteEmptyChunks: a.WriteEmptyChunks}
+}
+
+// readStored reads and decodes the whole of the stored object at sidx.
+func readStored[T Element](ctx context.Context, a *Array, sidx []int) ([]T, error) {
+	key := a.storedKey(sidx)
+	b, err := a.store.Get(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return filled(product(a.grid), a.fill.(T)), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	v, err := a.codecs.decode(b, a.storedSpec())
+	if err != nil {
+		return nil, fmt.Errorf("zarr: %s: %w", key, err)
+	}
+	return asChunk[T](v, product(a.grid), key)
+}
+
+func asChunk[T Element](v any, n int, key string) ([]T, error) {
+	s, ok := v.([]T)
+	if !ok || len(s) != n {
+		return nil, fmt.Errorf("zarr: %s decoded to %T of %d, not %d elements", key, v, len(s), n)
+	}
+	return s, nil
+}
+
+// writeStored encodes and writes the whole of the stored object at sidx, or
+// deletes it if it is nothing but fill.
+func writeStored[T Element](ctx context.Context, a *Array, sidx []int, data []T) error {
+	key := a.storedKey(sidx)
 	if !a.WriteEmptyChunks && allFill(data, a.fill.(T)) {
 		return a.store.Delete(ctx, key)
 	}
-	b, err := a.codecs.encode(data, a.meta.DataType)
+	b, err := a.codecs.encode(data, a.storedSpec())
 	if err != nil {
-		return fmt.Errorf("zarr: chunk %s: %w", key, err)
+		return fmt.Errorf("zarr: %s: %w", key, err)
 	}
 	return a.store.Set(ctx, key, b)
+}
+
+// openStored is a reader of the chunks of the stored object at sidx, each by
+// its index within that object. An unsharded chunk is read whole when it is
+// asked for. A shard is read whole at once, unless the store can read ranges
+// and nothing but the sharding codec is between the shard and its bytes:
+// then its index is read now and each chunk when it is asked for.
+func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(local []int) ([]T, error), error) {
+	sidx = slices.Clone(sidx)
+	if a.shard == nil {
+		return func([]int) ([]T, error) { return readStored[T](ctx, a, sidx) }, nil
+	}
+	key, n := a.storedKey(sidx), product(a.chunks)
+	spec := a.shard.innerSpec(a.storedSpec())
+	nothing := func([]int) ([]T, error) { return filled(n, a.fill.(T)), nil }
+	rg, ranged := a.store.(RangeGetter)
+	if !ranged || len(a.codecs.bytes) > 0 {
+		all, err := readStored[T](ctx, a, sidx)
+		if err != nil {
+			return nil, err
+		}
+		return func(local []int) ([]T, error) {
+			out := make([]T, n)
+			copyBlock(out, a.chunks, make([]int, len(local)), all, a.grid, times(local, a.chunks), a.chunks)
+			return out, nil
+		}, nil
+	}
+	off := int64(0)
+	if a.shard.location() == IndexEnd {
+		off = -int64(a.indexSize)
+	}
+	ib, err := rg.GetRange(ctx, key, off, int64(a.indexSize))
+	if errors.Is(err, ErrNotFound) {
+		return nothing, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	index, err := a.shard.decodeIndex(a.perShard, ib)
+	if err != nil {
+		return nil, fmt.Errorf("zarr: %s: %w", key, err)
+	}
+	return func(local []int) ([]T, error) {
+		k := 0
+		for d := range local {
+			k = k*a.perShard[d] + local[d]
+		}
+		o, l, ok, err := entrySpan(index, k, math.MaxInt64)
+		if err != nil {
+			return nil, fmt.Errorf("zarr: %s: %w", key, err)
+		}
+		if !ok {
+			return nothing(local)
+		}
+		b, err := rg.GetRange(ctx, key, int64(o), int64(l))
+		if err != nil {
+			return nil, err
+		}
+		v, err := a.shard.inner.decode(b, spec)
+		if err != nil {
+			return nil, fmt.Errorf("zarr: %s chunk %v: %w", key, local, err)
+		}
+		return asChunk[T](v, n, key)
+	}, nil
 }
 
 func filled[T Element](n int, fill T) []T {
@@ -316,14 +457,15 @@ func allFill[T Element](s []T, fill T) bool {
 	return true
 }
 
-// region checks a region of the array and says where its chunks begin and
-// end, inclusive; empty is true if it has no elements.
-func (a *Array) region(start, shape []int) (start2, shape2, lo, hi []int, empty bool, err error) {
+// region checks a region of the array and says where on a grid of cells of
+// the shape cell it begins and ends, inclusive; empty is true if it has no
+// elements.
+func (a *Array) region(start, shape, cell []int) (start2, shape2, lo, hi []int, empty bool, err error) {
 	d := len(a.meta.Shape)
 	if start == nil {
 		start = make([]int, d)
 	}
-	if shape == nil {
+	if shape == nil && len(start) == d {
 		shape = make([]int, d)
 		for k := range shape {
 			shape[k] = a.meta.Shape[k] - min(start[k], a.meta.Shape[k])
@@ -341,20 +483,21 @@ func (a *Array) region(start, shape []int) (start2, shape2, lo, hi []int, empty 
 			empty = true
 			continue
 		}
-		lo[k] = start[k] / a.chunks[k]
-		hi[k] = (start[k] + shape[k] - 1) / a.chunks[k]
+		lo[k] = start[k] / cell[k]
+		hi[k] = (start[k] + shape[k] - 1) / cell[k]
 	}
 	return start, shape, lo, hi, empty, nil
 }
 
-// overlap is where the region at start of shape meets the chunk at idx: its
-// first element and extent, in the array's coordinates.
-func (a *Array) overlap(idx, start, shape []int) (at, n []int, whole bool) {
+// overlap is where the region at start of shape meets the cell at idx on a
+// grid of cells of shape cell: its first element and extent, in the array's
+// coordinates, and whether it covers all of the cell that is in the array.
+func (a *Array) overlap(idx, start, shape, cell []int) (at, n []int, whole bool) {
 	at, n = make([]int, len(idx)), make([]int, len(idx))
 	whole = true
 	for k := range idx {
-		c0 := idx[k] * a.chunks[k]
-		c1 := min(c0+a.chunks[k], a.meta.Shape[k])
+		c0 := idx[k] * cell[k]
+		c1 := min(c0+cell[k], a.meta.Shape[k])
 		at[k] = max(start[k], c0)
 		n[k] = min(start[k]+shape[k], c1) - at[k]
 		whole = whole && at[k] == c0 && n[k] == c1-c0
@@ -370,21 +513,13 @@ func minus(a []int, b []int) []int {
 	return out
 }
 
-func (a *Array) chunkOrigin(idx []int) []int {
-	o := make([]int, len(idx))
-	for k := range idx {
-		o[k] = idx[k] * a.chunks[k]
-	}
-	return o
-}
-
 // Read reads the region of the array beginning at start and of shape, in C
 // order. A nil start is the origin, and a nil shape the rest of the array.
 func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, error) {
 	if err := checkType[T](a); err != nil {
 		return nil, err
 	}
-	start, shape, lo, hi, empty, err := a.region(start, shape)
+	start, shape, lo, hi, empty, err := a.region(start, shape, a.chunks)
 	if err != nil {
 		return nil, err
 	}
@@ -392,27 +527,39 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 	if empty {
 		return out, nil
 	}
-	err = eachIndex(lo, hi, func(idx []int) error {
-		buf, err := readChunk[T](ctx, a, idx)
+	err = eachIndex(a.shardOf(lo), a.shardOf(hi), func(sidx []int) error {
+		read, err := openStored[T](ctx, a, sidx)
 		if err != nil {
 			return err
 		}
-		at, n, _ := a.overlap(idx, start, shape)
-		copyBlock(out, shape, minus(at, start), buf, a.chunks, minus(at, a.chunkOrigin(idx)), n)
-		return nil
+		first := times(sidx, a.perShard)
+		ilo, ihi := make([]int, len(lo)), make([]int, len(lo))
+		for k := range lo {
+			ilo[k] = max(lo[k], first[k])
+			ihi[k] = min(hi[k], first[k]+a.perShard[k]-1)
+		}
+		return eachIndex(ilo, ihi, func(idx []int) error {
+			buf, err := read(minus(idx, first))
+			if err != nil {
+				return err
+			}
+			at, n, _ := a.overlap(idx, start, shape, a.chunks)
+			copyBlock(out, shape, minus(at, start), buf, a.chunks, minus(at, times(idx, a.chunks)), n)
+			return nil
+		})
 	})
 	return out, err
 }
 
 // Write writes data over the region of the array beginning at start and of
 // shape, in C order. A nil start is the origin, and a nil shape the rest of
-// the array. A chunk the region covers only part of is read and written
-// back.
+// the array. A chunk - or a shard, in a sharded array - the region covers
+// only part of is read and written back.
 func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []T) error {
 	if err := checkType[T](a); err != nil {
 		return err
 	}
-	start, shape, lo, hi, empty, err := a.region(start, shape)
+	start, shape, lo, hi, empty, err := a.region(start, shape, a.grid)
 	if err != nil {
 		return err
 	}
@@ -422,16 +569,16 @@ func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []
 	if empty {
 		return nil
 	}
-	return eachIndex(lo, hi, func(idx []int) error {
-		at, n, whole := a.overlap(idx, start, shape)
+	return eachIndex(lo, hi, func(sidx []int) error {
+		at, n, whole := a.overlap(sidx, start, shape, a.grid)
 		var buf []T
 		if whole {
-			buf = filled(product(a.chunks), a.fill.(T))
-		} else if buf, err = readChunk[T](ctx, a, idx); err != nil {
+			buf = filled(product(a.grid), a.fill.(T))
+		} else if buf, err = readStored[T](ctx, a, sidx); err != nil {
 			return err
 		}
-		copyBlock(buf, a.chunks, minus(at, a.chunkOrigin(idx)), data, shape, minus(at, start), n)
-		return writeChunk(ctx, a, idx, buf)
+		copyBlock(buf, a.grid, minus(at, times(sidx, a.grid)), data, shape, minus(at, start), n)
+		return writeStored(ctx, a, sidx, buf)
 	})
 }
 

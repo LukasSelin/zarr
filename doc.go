@@ -12,17 +12,18 @@
 //   - the data types bool, int8 to int64, uint8 to uint64, float32 and float64;
 //   - the regular chunk grid;
 //   - the default and v2 chunk key encodings;
-//   - the codecs bytes, gzip and crc32c.
+//   - the codecs bytes, gzip, crc32c and sharding_indexed.
 //
 // Other codecs can be registered with RegisterCodec - zstd, for one, which
-// the standard library does not have. Not yet here: sharding, transpose,
-// float16, complex and raw data types, storage transformers.
+// the standard library does not have. Not yet here: transpose, float16,
+// complex and raw data types, storage transformers.
 //
 // Arrays are read and written with the generic functions Read, Write,
 // ReadChunk and WriteChunk, whose element type must be the array's data
 // type. Elements are in C order: the last dimension varies fastest.
 //
 // An Array may be read from several goroutines at once, and written from
-// several so long as no two write the same chunk. SetAttributes may not run
+// several so long as no two write the same chunk - or, in a sharded array,
+// the same shard. SetAttributes may not run
 // beside anything else on the same node.
 package zarr

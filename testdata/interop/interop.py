@@ -15,7 +15,7 @@ import sys
 
 import numpy as np
 import zarr
-from zarr.codecs import BytesCodec, Crc32cCodec, GzipCodec
+from zarr.codecs import BytesCodec, Crc32cCodec, GzipCodec, ShardingCodec
 
 HERE = pathlib.Path(__file__).parent
 CASES = json.loads((HERE / "cases.json").read_text())
@@ -55,13 +55,28 @@ def write(path):
         if "/" in name:
             root.require_group(name.rsplit("/", 1)[0])
         compressors = [GzipCodec(level=5) if c == "gzip" else Crc32cCodec() for c in case["compressors"]]
+        serializer = BytesCodec(endian=case["endian"])
+        chunks, shards = tuple(case["chunks"]), None
+        sharding = case.get("sharding")
+        if sharding and sharding.get("after"):
+            # Codecs after the shard: zarr-python takes these only as a
+            # sharding serializer with the shard as its chunk.
+            serializer = ShardingCodec(
+                chunk_shape=chunks,
+                codecs=[serializer, *compressors],
+                index_location=sharding["index_location"],
+            )
+            chunks, compressors = tuple(sharding["shape"]), [GzipCodec(level=5) for _ in sharding["after"]]
+        elif sharding:
+            shards = {"shape": tuple(sharding["shape"]), "index_location": sharding["index_location"]}
         arr = root.create_array(
             name,
             shape=tuple(case["shape"]),
-            chunks=tuple(case["chunks"]),
+            chunks=chunks,
+            shards=shards,
             dtype=case["dtype"],
             fill_value=fill_of(case),
-            serializer=BytesCodec(endian=case["endian"]) if case["endian"] else BytesCodec(endian=None),
+            serializer=serializer,
             compressors=compressors,
             filters=[],
             chunk_key_encoding={"name": "default", "separator": case["separator"]},
@@ -85,8 +100,20 @@ def read(path):
                 failures.append(f"{name}: dtype {got.dtype}, want {want.dtype}")
             elif not np.array_equal(got, want, equal_nan=want.dtype.kind == "f"):
                 failures.append(f"{name}: data\n got {got!r}\nwant {want!r}")
-            if tuple(arr.chunks) != tuple(case["chunks"]):
+            sharding = case.get("sharding") or {}
+            if sharding.get("after"):
+                # zarr-python reports the shard as the chunk here.
+                codec = arr.metadata.codecs[0]
+                if tuple(codec.chunk_shape) != tuple(case["chunks"]) or tuple(arr.chunks) != tuple(sharding["shape"]):
+                    failures.append(f"{name}: chunks {codec.chunk_shape} in {arr.chunks}")
+            elif tuple(arr.chunks) != tuple(case["chunks"]):
                 failures.append(f"{name}: chunks {arr.chunks}")
+            elif sharding and tuple(arr.shards) != tuple(sharding["shape"]):
+                failures.append(f"{name}: shards {arr.shards}")
+            if sharding:
+                location = arr.metadata.codecs[0].index_location
+                if str(getattr(location, "value", location)) != sharding["index_location"]:
+                    failures.append(f"{name}: index location {location}")
             names = case.get("dimension_names")
             if names is not None and list(arr.metadata.dimension_names) != names:
                 failures.append(f"{name}: dimension names {arr.metadata.dimension_names}")
