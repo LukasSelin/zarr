@@ -67,6 +67,31 @@ both are - reads a shard's index and then only the chunks it needs. `Write`
 writes whole shards, as zarr-python does: a region that covers part of a
 shard reads the rest of it and writes it all back.
 
+## Stores that are not trusted
+
+Metadata, chunks and shards that are malformed are an error, never a
+panic, and a store cannot make a read allocate more than its metadata
+implies. An array does not open if its shape counts more elements than an
+int, or if a chunk, a shard or a shard's index would be more than 2 GiB. A
+gzip chunk may inflate to no more than its elements take, through the
+codecs before it. A shard's index must put every chunk inside the shard,
+clear of the index and of every other chunk. A region read is made whole
+in memory, so look at the shape of an array from a stranger before reading
+all of it.
+
+The fuzz tests hold this: metadata, each codec, a shard and its index, and
+an array opened and read from a store of fuzzed keys, none of which may
+panic or allocate past a bound. `go test` runs their seeds and
+`testdata/fuzz`; to fuzz one:
+
+```sh
+go test -run '^$' -fuzz '^FuzzOpenAndRead$' -fuzztime 5m .
+```
+
+`bench_test.go` has Write and Read of a 512 by 1024 float64 array in chunks
+of 64 at gzip 5, with and without shards of 16 chunks, a 3 by 3 region from
+shards in a directory, and ReadChunk and WriteChunk.
+
 ## Against zarr-python
 
 `TestZarrPython` has zarr-python write every case in
