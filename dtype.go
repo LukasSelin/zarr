@@ -54,6 +54,9 @@ func (d DataType) signed() bool {
 	return d == Int8 || d == Int16 || d == Int32 || d == Int64
 }
 
+// DataTypeOf is the data type of an array whose elements are T.
+func DataTypeOf[T Element]() DataType { return dataTypeOf[T]() }
+
 func dataTypeOf[T Element]() DataType {
 	var z T
 	switch any(z).(type) {
