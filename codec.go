@@ -313,17 +313,40 @@ func parseGzip(cfg json.RawMessage, _ DataType) (Codec, error) {
 func (GzipCodec) Name() string         { return "gzip" }
 func (c GzipCodec) Configuration() any { return map[string]int{"level": c.Level} }
 
+// gzipWriters keeps writers of each level from gzip.HuffmanOnly to
+// gzip.BestCompression, and gzipReaders readers: a writer is most of a
+// megabyte and a reader tens of kilobytes, and either reset does what a new
+// one does, byte for byte.
+var (
+	gzipWriters [gzip.BestCompression - gzip.HuffmanOnly + 1]sync.Pool
+	gzipReaders sync.Pool
+)
+
 func (c GzipCodec) EncodeBytes(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	w, err := gzip.NewWriterLevel(&buf, c.Level)
-	if err != nil {
-		return nil, err
+	var w *gzip.Writer
+	var pool *sync.Pool
+	if c.Level >= gzip.HuffmanOnly && c.Level <= gzip.BestCompression {
+		pool = &gzipWriters[c.Level-gzip.HuffmanOnly]
+		if w, _ = pool.Get().(*gzip.Writer); w != nil {
+			w.Reset(&buf)
+		}
+	}
+	if w == nil {
+		var err error
+		if w, err = gzip.NewWriterLevel(&buf, c.Level); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := w.Write(data); err != nil {
 		return nil, err
 	}
 	if err := w.Close(); err != nil {
 		return nil, err
+	}
+	if pool != nil {
+		w.Reset(io.Discard)
+		pool.Put(w)
 	}
 	return buf.Bytes(), nil
 }
@@ -335,19 +358,51 @@ func (c GzipCodec) DecodeBytes(data []byte) ([]byte, error) {
 }
 
 func (GzipCodec) decodeBytesLimit(data []byte, limit int64) ([]byte, error) {
-	r, err := gzip.NewReader(bytes.NewReader(data))
+	r, _ := gzipReaders.Get().(*gzip.Reader)
+	var err error
+	if r != nil {
+		err = r.Reset(bytes.NewReader(data))
+	} else {
+		r, err = gzip.NewReader(bytes.NewReader(data))
+	}
+	if r != nil {
+		defer gzipReaders.Put(r)
+	}
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
-	out, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err != nil {
-		return nil, err
+	// A gzip trailer ends with the length its member inflates to, which for
+	// a chunk of one member is the chunk's. It is only a hint: never more
+	// than the limit, nor than deflate can inflate data to.
+	size := min(limit, 1032*int64(len(data))+64)
+	if len(data) >= 4 {
+		size = min(size, int64(binary.LittleEndian.Uint32(data[len(data)-4:])))
 	}
-	if int64(len(out)) > limit {
-		return nil, fmt.Errorf("zarr: gzip: a chunk inflates past the %d bytes it may be", limit)
+	out := make([]byte, 0, size)
+	for {
+		if room := min(int64(cap(out)), limit); int64(len(out)) >= room {
+			// Full: whether there is more, a byte of it.
+			var one [1]byte
+			if _, err := io.ReadFull(r, one[:]); err == io.EOF {
+				return out, nil
+			} else if err != nil {
+				return nil, err
+			}
+			if int64(len(out)) >= limit {
+				return nil, fmt.Errorf("zarr: gzip: a chunk inflates past the %d bytes it may be", limit)
+			}
+			out = append(out, one[0])
+			continue
+		}
+		n, err := r.Read(out[len(out):min(int64(cap(out)), limit)])
+		out = out[:len(out)+n]
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out, nil
 }
 
 // CRC32CCodec appends a CRC-32C checksum, little-endian, and checks it when

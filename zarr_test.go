@@ -2,6 +2,7 @@ package zarr
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -333,5 +334,30 @@ func TestTheElementTypeMustBeTheArrays(t *testing.T) {
 	}
 	if err := Write(ctx, a, []int{1}, []int{2}, []int32{1, 2}); err == nil {
 		t.Error("wrote past the end")
+	}
+}
+
+func TestAKeptGzipWriterWritesWhatANewOneDoes(t *testing.T) {
+	data := make([]byte, 100000)
+	for i := range data {
+		data[i] = byte(i * i >> 7)
+	}
+	for level := gzip.HuffmanOnly; level <= gzip.BestCompression; level++ {
+		var fresh bytes.Buffer
+		w := must(gzip.NewWriterLevel(&fresh, level))
+		w.Write(data)
+		w.Close()
+		for range 3 {
+			got := must(GzipCodec{Level: level}.EncodeBytes(data))
+			if !bytes.Equal(got, fresh.Bytes()) {
+				t.Fatalf("level %d: a kept writer wrote other bytes", level)
+			}
+			if back := must(GzipCodec{}.DecodeBytes(got)); !bytes.Equal(back, data) {
+				t.Fatalf("level %d: read back wrong", level)
+			}
+		}
+	}
+	if _, err := (GzipCodec{Level: 10}).EncodeBytes(data); err == nil {
+		t.Error("wrote gzip at level 10")
 	}
 }
