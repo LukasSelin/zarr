@@ -174,11 +174,39 @@ func (p pipeline) encode(chunk any, spec ChunkSpec) ([]byte, error) {
 func (p pipeline) decode(b []byte, spec ChunkSpec) (any, error) {
 	var err error
 	for i := len(p.bytes) - 1; i >= 0; i-- {
-		if b, err = p.bytes[i].DecodeBytes(b); err != nil {
+		if l, ok := p.bytes[i].(limitedDecoder); ok {
+			b, err = l.decodeBytesLimit(b, p.decodeLimit(spec, i))
+		} else {
+			b, err = p.bytes[i].DecodeBytes(b)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
 	return p.array.DecodeArray(b, spec)
+}
+
+// decodeLimit is the most bytes the i-th bytes codec may decode a chunk of
+// spec to: what the codecs before it encode such a chunk to at most, or as
+// much as a chunk may be if that cannot be said.
+func (p pipeline) decodeLimit(spec ChunkSpec, i int) int64 {
+	n := encodedBound(p.array, spec)
+	for _, c := range p.bytes[:i] {
+		if n == unbounded || n > maxStoredBytes*2 {
+			break
+		}
+		n = bytesBound(c, n)
+	}
+	if n == unbounded || n > maxStoredBytes*2 {
+		return maxStoredBytes
+	}
+	return n
+}
+
+// limitedDecoder is a bytes-to-bytes codec that can be told the most bytes
+// it may decode to, and fails rather than decode to more.
+type limitedDecoder interface {
+	decodeBytesLimit(data []byte, limit int64) ([]byte, error)
 }
 
 // Endian is the byte order of the bytes codec.
@@ -247,12 +275,17 @@ func (c BytesCodec) EncodeArray(chunk any, spec ChunkSpec) ([]byte, error) {
 }
 
 func (c BytesCodec) DecodeArray(data []byte, spec ChunkSpec) (any, error) {
-	d, n := spec.DataType, product(spec.Shape)
+	d := spec.DataType
 	order, err := c.order(d)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) != n*d.Size() {
+	size, err := storedBytes(spec.Shape, d)
+	if err != nil {
+		return nil, err
+	}
+	n := int(size) / d.Size()
+	if int64(len(data)) != size {
 		return nil, fmt.Errorf("zarr: chunk is %d bytes, not the %d of %d %s", len(data), n*d.Size(), n, d)
 	}
 	s := makeSlice(d, n)
@@ -295,13 +328,26 @@ func (c GzipCodec) EncodeBytes(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (GzipCodec) DecodeBytes(data []byte) ([]byte, error) {
+// DecodeBytes inflates data, to no more bytes than a chunk may be. An array
+// holds it to the bytes its chunks encode to.
+func (c GzipCodec) DecodeBytes(data []byte) ([]byte, error) {
+	return c.decodeBytesLimit(data, maxStoredBytes)
+}
+
+func (GzipCodec) decodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 	r, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	return io.ReadAll(r)
+	out, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(out)) > limit {
+		return nil, fmt.Errorf("zarr: gzip: a chunk inflates past the %d bytes it may be", limit)
+	}
+	return out, nil
 }
 
 // CRC32CCodec appends a CRC-32C checksum, little-endian, and checks it when

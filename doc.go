@@ -26,4 +26,12 @@
 // several so long as no two write the same chunk - or, in a sharded array,
 // the same shard. SetAttributes may not run
 // beside anything else on the same node.
+//
+// What a store holds is not trusted. Metadata, chunks and shards that are
+// malformed are an error, never a panic, and a store cannot make the package
+// allocate more than the metadata implies: an array whose shape counts more
+// elements than an int, or whose chunk - or shard, or shard index - is more
+// than 2 GiB, does not open; a compressed chunk may not inflate past the
+// bytes its elements take; and a shard's index must put every chunk inside
+// the shard, and no two over each other.
 package zarr

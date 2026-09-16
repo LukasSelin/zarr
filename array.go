@@ -155,8 +155,14 @@ func newArray(s Store, path string, m ArrayMetadata) (*Array, error) {
 			return nil, bad("shape %v, chunk shape %v", m.Shape, a.grid)
 		}
 	}
+	if _, ok := elements(m.Shape); !ok {
+		return nil, bad("shape %v has more elements than an int can count", m.Shape)
+	}
 	if m.DimensionNames != nil && len(m.DimensionNames) != len(m.Shape) {
 		return nil, bad("%d dimension names for %d dimensions", len(m.DimensionNames), len(m.Shape))
+	}
+	if _, err := storedBytes(a.grid, m.DataType); err != nil {
+		return nil, bad("%v", err)
 	}
 	var err error
 	if a.keys, err = parseKeyEncoding(m.ChunkKeyEncoding); err != nil {
@@ -221,7 +227,10 @@ func (a *Array) DimensionNames() []string {
 func (a *Array) NumChunks() []int {
 	n := make([]int, len(a.chunks))
 	for k := range n {
-		n[k] = (a.meta.Shape[k] + a.chunks[k] - 1) / a.chunks[k]
+		n[k] = a.meta.Shape[k] / a.chunks[k]
+		if a.meta.Shape[k]%a.chunks[k] != 0 {
+			n[k]++
+		}
 	}
 	return n
 }
@@ -411,6 +420,13 @@ func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(loca
 	if err != nil {
 		return nil, fmt.Errorf("zarr: %s: %w", key, err)
 	}
+	lo := uint64(0)
+	if a.shard.location() == IndexStart {
+		lo = uint64(a.indexSize)
+	}
+	if err := checkIndex(index, lo, math.MaxInt64); err != nil {
+		return nil, fmt.Errorf("zarr: %s: %w", key, err)
+	}
 	return func(local []int) ([]T, error) {
 		k := 0
 		for d := range local {
@@ -476,7 +492,7 @@ func (a *Array) region(start, shape, cell []int) (start2, shape2, lo, hi []int, 
 	}
 	lo, hi = make([]int, d), make([]int, d)
 	for k := range start {
-		if start[k] < 0 || shape[k] < 0 || start[k]+shape[k] > a.meta.Shape[k] {
+		if start[k] < 0 || shape[k] < 0 || start[k] > a.meta.Shape[k] || shape[k] > a.meta.Shape[k]-start[k] {
 			return nil, nil, nil, nil, false, fmt.Errorf("zarr: region at %v of %v is outside %v", start, shape, a.meta.Shape)
 		}
 		if shape[k] == 0 {
@@ -515,6 +531,8 @@ func minus(a []int, b []int) []int {
 
 // Read reads the region of the array beginning at start and of shape, in C
 // order. A nil start is the origin, and a nil shape the rest of the array.
+// The region is made whole in memory: the shape of an array from a store
+// that is not trusted is worth a look before all of it is read.
 func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, error) {
 	if err := checkType[T](a); err != nil {
 		return nil, err
@@ -522,6 +540,9 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 	start, shape, lo, hi, empty, err := a.region(start, shape, a.chunks)
 	if err != nil {
 		return nil, err
+	}
+	if n, _ := elements(shape); n > math.MaxInt/a.meta.DataType.Size() {
+		return nil, fmt.Errorf("zarr: a region of %v is more than can be held in memory", shape)
 	}
 	out := make([]T, product(shape))
 	if empty {

@@ -1,6 +1,7 @@
 package zarr
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -189,6 +190,9 @@ func (c *ShardingCodec) decodeIndex(perShard []int, b []byte) ([]uint64, error) 
 
 // indexSize is how many bytes the index of a shard holding perShard chunks is.
 func (c *ShardingCodec) indexSize(perShard []int) (int, error) {
+	if _, err := storedBytes(append(slices.Clone(perShard), 2), Uint64); err != nil {
+		return 0, fmt.Errorf("zarr: shard index of %v chunks: %w", perShard, err)
+	}
 	b, err := c.encodeIndex(perShard, slices.Repeat([]uint64{noChunk}, 2*product(perShard)))
 	return len(b), err
 }
@@ -266,6 +270,9 @@ func (c *ShardingCodec) DecodeArray(data []byte, spec ChunkSpec) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := storedBytes(spec.Shape, spec.DataType); err != nil {
+		return nil, err
+	}
 	size, err := c.indexSize(perShard)
 	if err != nil {
 		return nil, err
@@ -276,6 +283,13 @@ func (c *ShardingCodec) DecodeArray(data []byte, spec ChunkSpec) (any, error) {
 	}
 	index, err := c.decodeIndex(perShard, ib)
 	if err != nil {
+		return nil, err
+	}
+	lo, hi := uint64(0), uint64(len(data)-size)
+	if c.location() == IndexStart {
+		lo, hi = uint64(size), uint64(len(data))
+	}
+	if err := checkIndex(index, lo, hi); err != nil {
 		return nil, err
 	}
 	out := filledAny(spec.DataType, product(spec.Shape), spec.Fill)
@@ -307,6 +321,37 @@ func entry(index []uint64, k int, shard []byte) ([]byte, bool, error) {
 		return nil, ok, err
 	}
 	return shard[off : off+n], true, nil
+}
+
+// checkIndex fails unless every chunk a shard's index holds is within lo to
+// hi of the shard, and no two overlap.
+func checkIndex(index []uint64, lo, hi uint64) error {
+	type span struct{ off, n uint64 }
+	var spans []span
+	for k := 0; k < len(index)/2; k++ {
+		off, n, ok, err := entrySpan(index, k, hi)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if off < lo {
+			return fmt.Errorf("zarr: shard index puts chunk %d at %d, inside the index", k, off)
+		}
+		spans = append(spans, span{off, n})
+	}
+	// In order of offset, and of length at the same offset, no chunk may
+	// begin before the end of any before it.
+	slices.SortFunc(spans, func(a, b span) int { return cmp.Or(cmp.Compare(a.off, b.off), cmp.Compare(a.n, b.n)) })
+	end := uint64(0)
+	for _, s := range spans {
+		if s.off < end {
+			return fmt.Errorf("zarr: shard index puts a chunk at %d+%d, over one ending at %d", s.off, s.n, end)
+		}
+		end = max(end, s.off+s.n)
+	}
+	return nil
 }
 
 // entrySpan is where the k-th chunk is in a shard of size bytes.
