@@ -38,7 +38,7 @@ func (a *Array) withShape(shape []int) (*Array, error) {
 	if err != nil {
 		return nil, err
 	}
-	b.WriteEmptyChunks = a.WriteEmptyChunks
+	b.WriteEmptyChunks, b.Concurrency = a.WriteEmptyChunks, a.Concurrency
 	return b, nil
 }
 
@@ -58,8 +58,8 @@ func (a *Array) numStored() []int {
 // as the fill value. Shrinking first deletes the chunks, or shards, wholly
 // past the new end, and writes the ones the new end cuts through with fill
 // past it, and only then writes the metadata. A Resize that fails part way
-// may have filled some of what was being cut off; the shape is still the old
-// one.
+// may have filled some of what was being cut off, in no particular order;
+// the shape is still the old one.
 //
 // Another handle on the array keeps the shape it had until Refresh. Nothing
 // stops two writers resizing or appending to one array at once, and one of
@@ -90,11 +90,10 @@ func resizeStored(ctx context.Context, a, b *Array) error {
 	if !shrinks || product(n) == 0 {
 		return nil
 	}
-	hi := make([]int, len(n))
-	for k := range n {
-		hi[k] = n[k] - 1
-	}
-	return eachIndex(make([]int, len(n)), hi, func(sidx []int) error {
+	// Each stored object is deleted, refilled or left alone on its own, so
+	// they go in as many goroutines as the array allows.
+	lo, hi := make([]int, len(n)), minusOne(n)
+	return eachSpan(ctx, a.limit(spanLen(lo, hi)), lo, hi, func(ctx context.Context, _ int, sidx []int) error {
 		origin := times(sidx, a.grid)
 		gone, cut := false, false
 		for k := range origin {
@@ -207,14 +206,14 @@ func Append[T Element](ctx context.Context, a *Array, axis int, data []T) (int, 
 }
 
 // Refresh reads the array's metadata again: its shape, attributes and all,
-// as another handle on the array may have written them. WriteEmptyChunks is
-// kept.
+// as another handle on the array may have written them. WriteEmptyChunks and
+// Concurrency are kept.
 func (a *Array) Refresh(ctx context.Context) error {
 	b, err := OpenArray(ctx, a.store, a.path)
 	if err != nil {
 		return err
 	}
-	b.WriteEmptyChunks = a.WriteEmptyChunks
+	b.WriteEmptyChunks, b.Concurrency = a.WriteEmptyChunks, a.Concurrency
 	*a = *b
 	return nil
 }

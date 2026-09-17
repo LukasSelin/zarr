@@ -74,7 +74,9 @@ writers growing one array at once: one of them would lose.
 `github.com/LukasSelin/zarr/s3` is a module of its own, so that the core
 needs nothing past the standard library. Its `Store` is a `RangeGetter`: a
 sharded array is read a shard's index and the chunks it needs at a time,
-and a shard's index at its end is one request.
+and a shard's index at its end is one request. A region read has as many
+requests in flight as `Array.Concurrency`, so the 30 to 50 ms of a GET is
+waited out sixteen keys at a time by default rather than one.
 
 ```go
 cfg, _ := config.LoadDefaultConfig(ctx)
@@ -127,11 +129,32 @@ both are - reads a shard's index and then only the chunks it needs. `Write`
 writes whole shards, as zarr-python does: a region that covers part of a
 shard reads the rest of it and writes it all back.
 
+## Chunks at once
+
+`Read`, `Write`, `Resize` and `Append` work on up to `Array.Concurrency`
+stored objects at once, sixteen by default. A read of 508 chunks over a
+store whose round trip is 40 ms takes 508 of them one at a time - twenty
+seconds of nothing but waiting - and sixteen at a time it is about one.
+Decoding a chunk is microseconds, so the number to pick is how many
+requests the store will bear, not how many cores there are.
+
+```go
+h.Concurrency = 64 // an object store far away
+h.Concurrency = 1  // one at a time, as this package once did
+```
+
+Each object in flight is held in memory, and a gzip writer besides when
+writing, so an array of large shards read from a store that cannot do
+ranges wants a smaller number. The order chunks are fetched in is not
+defined, and a `Write` that fails part way has written some of the stored
+objects it covers and not others.
+
 ## Stores that are not trusted
 
 Metadata, chunks and shards that are malformed are an error, never a
 panic, and a store cannot make a read allocate more than its metadata
-implies. An array does not open if its shape counts more elements than an
+implies, times `Array.Concurrency` - which is a Go field, so nothing a
+store holds can raise it. An array does not open if its shape counts more elements than an
 int, or if a chunk, a shard or a shard's index would be more than 2 GiB. A
 gzip chunk may inflate to no more than its elements take, through the
 codecs before it. A shard's index must put every chunk inside the shard,

@@ -32,7 +32,9 @@ type ArrayBytesCodec interface {
 	DecodeArray(data []byte, spec ChunkSpec) (any, error)
 }
 
-// ChunkSpec is what a codec is told of the chunk it encodes or decodes.
+// ChunkSpec is what a codec is told of the chunk it encodes or decodes. A
+// codec may not keep it or change what it holds: several chunks of one array
+// are encoded and decoded at once, through the one spec.
 type ChunkSpec struct {
 	Shape    []int
 	DataType DataType

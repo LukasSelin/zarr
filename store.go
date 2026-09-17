@@ -15,6 +15,9 @@ import (
 // Store is where a hierarchy keeps its keys. Keys are slash-separated,
 // such as "height/c/0/1"; the metadata of a node is under "zarr.json" at its
 // path.
+//
+// A Store's methods may be called from several goroutines at once: a region
+// read or written fetches as many keys together as Array.Concurrency allows.
 type Store interface {
 	// Get returns the value under key, or an error wrapping ErrNotFound.
 	Get(ctx context.Context, key string) ([]byte, error)
