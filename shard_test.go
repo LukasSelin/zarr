@@ -9,7 +9,8 @@ import (
 	"testing"
 )
 
-// plainStore hides a store's range reads, so that shards are read whole.
+// plainStore hides a store's range reads and its one-level listing, so that
+// shards are read whole and a listing of one level is derived from List.
 type plainStore struct{ Store }
 
 // countingStore counts what is read from a store.

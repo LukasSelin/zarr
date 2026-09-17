@@ -23,6 +23,14 @@
 // ReadChunk and WriteChunk, whose element type must be the array's data
 // type. Elements are in C order: the last dimension varies fastest.
 //
+// The keys of a store are walked with Store.List, a prefix at a time, and one
+// level of them with ListDir, which a store that can do it cheaply - a
+// directory, a bucket - answers in one request. Group.Children is the nodes
+// directly in a group. Delete removes a node and everything under it, its
+// metadata first, so that a delete that fails part way leaves keys that
+// nothing opens rather than an array whose missing chunks read as the fill
+// value.
+//
 // An Array may be read from several goroutines at once, and written from
 // several so long as no two write the same chunk - or, in a sharded array,
 // the same shard. SetAttributes may not run

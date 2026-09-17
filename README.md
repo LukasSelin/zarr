@@ -69,6 +69,55 @@ the new end and fills the ones it cuts through before writing the metadata.
 A handle on the array keeps its shape until `Refresh`, and nothing stops two
 writers growing one array at once: one of them would lose.
 
+## Walking and deleting
+
+`Store.List` calls a function with every key under a prefix, so a hierarchy
+can be walked without holding all of it:
+
+```go
+var bytes int
+err := s.List(ctx, "fwi/", func(key string) error {
+	b, err := s.Get(ctx, key)
+	bytes += len(b)
+	return err
+})
+```
+
+A prefix is a string and not a path: `"height"` is also the keys of
+`"heightmap"`, and `""` is everything the store holds. Pass `path + "/"` for
+everything under a node.
+
+One level at a time is `zarr.ListDir`, which uses the store's own `ListDir`
+where there is one - a bucket rolls a level up with a delimiter, a directory
+reads one directory - and derives it from `List` where there is not, reading
+every key under the prefix to do it. `Group.Children` is the nodes directly
+in a group, with what each one is:
+
+```go
+for _, c := range children { // [{fwi array} {isi array} {sub group}]
+	fmt.Println(c.Name, c.Type)
+}
+```
+
+It costs a listing and a read of the metadata of each name, not a walk of
+every chunk under the group.
+
+`Delete` removes a node and everything under it:
+
+```go
+err := zarr.Delete(ctx, s, "fwi/isi") // or isi.Delete(ctx), root.Delete(ctx)
+```
+
+The metadata goes first, so a delete that fails part way leaves keys that
+nothing opens rather than an array whose missing chunks read as the fill
+value; doing it again clears what was left. It never reads the metadata, so
+a node this package cannot open goes too. The root, `""`, is the whole
+store. A `DirStore` keeps the directories a node was in, empty; nothing
+reads them, and `List` does not yield them.
+
+`Store` gained `List` in v0.3.0. A store of your own needs it, and may add
+`ListDir`; `storetest.Run` checks either against the contract.
+
 ## Stores in S3
 
 `github.com/LukasSelin/zarr/s3` is a module of its own, so that the core
