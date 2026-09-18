@@ -15,6 +15,9 @@ import (
 // Store is where a hierarchy keeps its keys. Keys are slash-separated,
 // such as "height/c/0/1"; the metadata of a node is under "zarr.json" at its
 // path.
+//
+// A Store's methods may be called from several goroutines at once: a region
+// read or written fetches as many keys together as Array.Concurrency allows.
 type Store interface {
 	// Get returns the value under key, or an error wrapping ErrNotFound.
 	Get(ctx context.Context, key string) ([]byte, error)
@@ -452,8 +455,10 @@ func (s *DirStore) List(ctx context.Context, prefix string, fn func(key string) 
 		}
 		key := filepath.ToSlash(rel)
 		if checkKey(key) != nil {
-			// A file no Set could have written.
-			return nil
+			// A file no Set could have written: it is not a key, so it is
+			// not listed. The error says why it is skipped, not that the
+			// walk failed.
+			return nil //nolint:nilerr
 		}
 		if err := fn(key); err != nil {
 			return listStop{err}

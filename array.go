@@ -34,6 +34,14 @@ type Array struct {
 	// By default such a chunk is not stored; it reads as the fill value
 	// either way.
 	WriteEmptyChunks bool
+	// Concurrency is how many stored objects - chunks, or shards - Read,
+	// Write, Resize and Append work on at once, and how many chunks of a
+	// shard a read fetches at once where the store reads ranges. Zero is a
+	// default that suits an object store, whose round trip is what there is
+	// to hide, and one does them one at a time. Each one in flight is held
+	// in memory, and a gzip writer besides when writing, so an array of
+	// large shards wants a smaller number.
+	Concurrency int
 }
 
 // ArrayOptions is what an array is created with.
@@ -309,7 +317,7 @@ func ReadChunk[T Element](ctx context.Context, a *Array, idx []int) ([]T, error)
 	if err != nil {
 		return nil, err
 	}
-	return read(minus(idx, times(sidx, a.perShard)))
+	return read(ctx, minus(idx, times(sidx, a.perShard)))
 }
 
 // WriteChunk writes the whole chunk at idx: data is chunk shape long. The
@@ -339,6 +347,8 @@ func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) e
 	return writeStored(ctx, a, sidx, buf, true)
 }
 
+// storedSpec is the spec of a stored object, and is the same one for every
+// chunk of the array: a codec may not keep it or change what it holds.
 func (a *Array) storedSpec() ChunkSpec {
 	return ChunkSpec{Shape: a.grid, DataType: a.meta.DataType, Fill: a.fill, WriteEmptyChunks: a.WriteEmptyChunks}
 }
@@ -388,29 +398,32 @@ func writeStored[T Element](ctx context.Context, a *Array, sidx []int, data []T,
 
 // openStored is a reader of the chunks of the stored object at sidx, each by
 // its index within that object. An unsharded chunk is read whole when it is
-// asked for. A shard is read whole at once, unless the store can read ranges
-// and nothing but the sharding codec is between the shard and its bytes:
-// then its index is read now and each chunk when it is asked for.
-func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(local []int) ([]T, error), error) {
+// asked for. A shard is read whole at once, unless byRange: then its index is
+// read now and each chunk when it is asked for. The reader it returns may be
+// called from several goroutines at once, and outlives the ctx the object was
+// opened with: each call has a ctx of its own.
+func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(ctx context.Context, local []int) ([]T, error), error) {
+	// The reader outlives the loop that is walking the indices, which keeps
+	// one slice of its own for all of them.
 	sidx = slices.Clone(sidx)
 	if a.shard == nil {
-		return func([]int) ([]T, error) { return readStored[T](ctx, a, sidx) }, nil
+		return func(ctx context.Context, _ []int) ([]T, error) { return readStored[T](ctx, a, sidx) }, nil
 	}
 	key, n := a.storedKey(sidx), product(a.chunks)
 	spec := a.shard.innerSpec(a.storedSpec())
-	nothing := func([]int) ([]T, error) { return filled(n, a.fill.(T)), nil }
-	rg, ranged := a.store.(RangeGetter)
-	if !ranged || len(a.codecs.bytes) > 0 {
+	nothing := func(context.Context, []int) ([]T, error) { return filled(n, a.fill.(T)), nil }
+	if !a.byRange() {
 		all, err := readStored[T](ctx, a, sidx)
 		if err != nil {
 			return nil, err
 		}
-		return func(local []int) ([]T, error) {
+		return func(_ context.Context, local []int) ([]T, error) {
 			out := make([]T, n)
 			copyBlock(out, a.chunks, make([]int, len(local)), all, a.grid, times(local, a.chunks), a.chunks)
 			return out, nil
 		}, nil
 	}
+	rg := a.store.(RangeGetter)
 	off := int64(0)
 	if a.shard.location() == IndexEnd {
 		off = -int64(a.indexSize)
@@ -433,7 +446,7 @@ func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(loca
 	if err := checkIndex(index, lo, math.MaxInt64); err != nil {
 		return nil, fmt.Errorf("zarr: %s: %w", key, err)
 	}
-	return func(local []int) ([]T, error) {
+	return func(ctx context.Context, local []int) ([]T, error) {
 		k := 0
 		for d := range local {
 			k = k*a.perShard[d] + local[d]
@@ -443,7 +456,7 @@ func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(loca
 			return nil, fmt.Errorf("zarr: %s: %w", key, err)
 		}
 		if !ok {
-			return nothing(local)
+			return nothing(ctx, local)
 		}
 		b, err := rg.GetRange(ctx, key, int64(o), int64(l))
 		if err != nil {
@@ -554,34 +567,65 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 	if empty {
 		return out, nil
 	}
-	err = eachIndex(a.shardOf(lo), a.shardOf(hi), func(sidx []int) error {
+	// Each chunk goes to a block of out that is its own, so the chunks are
+	// read in as many goroutines as the array allows.
+	slo, shi := a.shardOf(lo), a.shardOf(hi)
+	chunk := func(ctx context.Context, read func(ctx context.Context, local []int) ([]T, error), idx, first []int) error {
+		buf, err := read(ctx, minus(idx, first))
+		if err != nil {
+			return err
+		}
+		at, n, _ := a.overlap(idx, start, shape, a.chunks)
+		copyBlock(out, shape, minus(at, start), buf, a.chunks, minus(at, times(idx, a.chunks)), n)
+		return nil
+	}
+	if !a.byRange() {
+		// A stored object read whole is one piece of work, its chunks copied
+		// out of it in turn: that copying is no more than memory, and
+		// holding a stored object for each goroutine is enough of them.
+		return out, eachSpan(ctx, a.limit(spanLen(slo, shi)), slo, shi, func(ctx context.Context, _ int, sidx []int) error {
+			read, err := openStored[T](ctx, a, sidx)
+			if err != nil {
+				return err
+			}
+			first := times(sidx, a.perShard)
+			ilo, ihi := make([]int, len(lo)), make([]int, len(lo))
+			for k := range lo {
+				ilo[k] = max(lo[k], first[k])
+				ihi[k] = min(hi[k], first[k]+a.perShard[k]-1)
+			}
+			return eachIndex(ilo, ihi, func(idx []int) error { return chunk(ctx, read, idx, first) })
+		})
+	}
+	// A chunk read by range is a piece of work of its own, once every shard
+	// index is in. An index is sixteen bytes a chunk, against the chunk
+	// itself in out, so all of them together are a part in thousands of what
+	// is being read; and a shard whose index is broken fails before a single
+	// chunk is fetched.
+	readers := make([]func(ctx context.Context, local []int) ([]T, error), spanLen(slo, shi))
+	err = eachSpan(ctx, a.limit(len(readers)), slo, shi, func(ctx context.Context, n int, sidx []int) error {
 		read, err := openStored[T](ctx, a, sidx)
 		if err != nil {
 			return err
 		}
-		first := times(sidx, a.perShard)
-		ilo, ihi := make([]int, len(lo)), make([]int, len(lo))
-		for k := range lo {
-			ilo[k] = max(lo[k], first[k])
-			ihi[k] = min(hi[k], first[k]+a.perShard[k]-1)
-		}
-		return eachIndex(ilo, ihi, func(idx []int) error {
-			buf, err := read(minus(idx, first))
-			if err != nil {
-				return err
-			}
-			at, n, _ := a.overlap(idx, start, shape, a.chunks)
-			copyBlock(out, shape, minus(at, start), buf, a.chunks, minus(at, times(idx, a.chunks)), n)
-			return nil
-		})
+		readers[n] = read
+		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	return out, eachSpan(ctx, a.limit(spanLen(lo, hi)), lo, hi, func(ctx context.Context, _ int, idx []int) error {
+		sidx := a.shardOf(idx)
+		return chunk(ctx, readers[spanOf(slo, shi, sidx)], idx, times(sidx, a.perShard))
+	})
 }
 
 // Write writes data over the region of the array beginning at start and of
 // shape, in C order. A nil start is the origin, and a nil shape the rest of
 // the array. A chunk - or a shard, in a sharded array - the region covers
-// only part of is read and written back.
+// only part of is read and written back. A Write that fails part way has
+// written some of the stored objects the region covers and not others, in no
+// particular order.
 func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []T) error {
 	if err := checkType[T](a); err != nil {
 		return err
@@ -596,9 +640,13 @@ func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []
 	if empty {
 		return nil
 	}
-	return eachIndex(lo, hi, func(sidx []int) error {
+	// No two of the stored objects the region covers are the same one, so
+	// they are read, patched and written in as many goroutines as the array
+	// allows.
+	return eachSpan(ctx, a.limit(spanLen(lo, hi)), lo, hi, func(ctx context.Context, _ int, sidx []int) error {
 		at, n, whole := a.overlap(sidx, start, shape, a.grid)
 		var buf []T
+		var err error
 		if whole {
 			buf = filled(product(a.grid), a.fill.(T))
 		} else if buf, err = readStored[T](ctx, a, sidx); err != nil {

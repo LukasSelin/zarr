@@ -84,7 +84,7 @@ func Run(t *testing.T, fresh func() zarr.Store) {
 	})
 
 	t.Run("listing under a prefix", func(t *testing.T) {
-		s := seeded(t, fresh, ctx)
+		s := seeded(ctx, t, fresh)
 		for _, c := range []struct {
 			prefix string
 			want   []string
@@ -97,14 +97,14 @@ func Run(t *testing.T, fresh func() zarr.Store) {
 			{"nothing/", nil},
 			{"zarr.json", []string{"zarr.json"}},
 		} {
-			if got := list(t, s, ctx, c.prefix); !same(got, c.want) {
+			if got := list(ctx, t, s, c.prefix); !same(got, c.want) {
 				t.Errorf("list %q = %v, want %v", c.prefix, got, c.want)
 			}
 		}
 	})
 
 	t.Run("listing stops at the error of the callback", func(t *testing.T) {
-		s := seeded(t, fresh, ctx)
+		s := seeded(ctx, t, fresh)
 		stop := errors.New("stop here")
 		n := 0
 		err := s.List(ctx, "", func(string) error {
@@ -120,7 +120,7 @@ func Run(t *testing.T, fresh func() zarr.Store) {
 	})
 
 	t.Run("one level of a listing", func(t *testing.T) {
-		s := seeded(t, fresh, ctx)
+		s := seeded(ctx, t, fresh)
 		for _, c := range []struct {
 			prefix string
 			want   []string
@@ -145,7 +145,7 @@ func Run(t *testing.T, fresh func() zarr.Store) {
 }
 
 // seeded is a store holding the seed keys.
-func seeded(t *testing.T, fresh func() zarr.Store, ctx context.Context) zarr.Store {
+func seeded(ctx context.Context, t *testing.T, fresh func() zarr.Store) zarr.Store {
 	t.Helper()
 	s := fresh()
 	for _, k := range seed {
@@ -157,7 +157,7 @@ func seeded(t *testing.T, fresh func() zarr.Store, ctx context.Context) zarr.Sto
 }
 
 // list is every key of s under prefix.
-func list(t *testing.T, s zarr.Store, ctx context.Context, prefix string) []string {
+func list(ctx context.Context, t *testing.T, s zarr.Store, prefix string) []string {
 	t.Helper()
 	var got []string
 	if err := s.List(ctx, prefix, func(key string) error {

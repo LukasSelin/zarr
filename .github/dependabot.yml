@@ -1,0 +1,24 @@
+# govulncheck finds what is already known to be broken; this keeps the
+# modules current so there is less of it to find. Each module is updated on
+# its own, as each has its own go.mod.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories:
+      - "/"
+      - "/s3"
+      - "/zstd"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      aws-sdk:
+        patterns:
+          - "github.com/aws/*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday

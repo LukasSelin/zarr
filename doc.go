@@ -31,14 +31,21 @@
 // nothing opens rather than an array whose missing chunks read as the fill
 // value.
 //
+// Read, Write, Resize and Append work on up to Array.Concurrency stored
+// objects at once - sixteen by default - so that the round trip of an object
+// store is waited out many keys at a time rather than one. A Store's methods
+// must therefore bear being called from several goroutines at once, and each
+// object in flight is held in memory; set Concurrency to 1 for one at a time.
+//
 // An Array may be read from several goroutines at once, and written from
 // several so long as no two write the same chunk - or, in a sharded array,
-// the same shard. SetAttributes may not run
-// beside anything else on the same node.
+// the same shard. SetAttributes may not run beside anything else on the same
+// node.
 //
 // What a store holds is not trusted. Metadata, chunks and shards that are
 // malformed are an error, never a panic, and a store cannot make the package
-// allocate more than the metadata implies: an array whose shape counts more
+// allocate more than the metadata implies, times Array.Concurrency: an array
+// whose shape counts more
 // elements than an int, or whose chunk - or shard, or shard index - is more
 // than 2 GiB, does not open; a compressed chunk may not inflate past the
 // bytes its elements take; and a shard's index must put every chunk inside

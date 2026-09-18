@@ -1,0 +1,156 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Vulnerabilities are found after the code is written, so the scan runs
+    # again on its own every Monday.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  # Pinned rather than 1.25.x: govulncheck reports the standard library too,
+  # and 1.25.13 is where the crypto/tls, crypto/x509 and net/url findings it
+  # had against 1.25.3 are fixed. The go.mod toolchain lines say the same, so
+  # a build here and a build on a laptop are the same build.
+  GO_VERSION: "1.25.13"
+
+jobs:
+  test:
+    name: test ${{ matrix.module }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        module: [".", "s3", "zstd"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - name: build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+      - name: vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+      # -race is what makes the goroutines the tests leave behind worth
+      # finding: goleak says one is still running, the detector says what it
+      # touched while it was.
+      - name: test
+        working-directory: ${{ matrix.module }}
+        run: go test -race -count=1 ./...
+
+  tidy:
+    name: go.mod is tidy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - name: go mod tidy leaves nothing behind
+        run: |
+          for m in . s3 zstd; do
+            (cd "$m" && go mod tidy)
+          done
+          git diff --exit-code || {
+            echo "::error::go mod tidy changed go.mod or go.sum; commit the result"
+            exit 1
+          }
+
+  lint:
+    name: golangci-lint ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [".", "s3", "zstd"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+          working-directory: ${{ matrix.module }}
+          args: --config=${{ github.workspace }}/.golangci.yml --timeout=5m
+
+  govulncheck:
+    name: govulncheck ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [".", "s3", "zstd"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      # Not golang/govulncheck-action: it sets GOTOOLCHAIN=local, and
+      # building govulncheck now asks for a newer Go than the one these
+      # modules are meant to be read with, so installing it fails outright.
+      # go run fetches what the tool itself needs, while the analysis stays
+      # on the toolchain each go.mod asks for - which is the version whose
+      # standard library we want reported. Same command as `make vuln`.
+      - name: govulncheck
+        working-directory: ${{ matrix.module }}
+        env:
+          GOTOOLCHAIN: auto
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: "."
+            target: FuzzMetadata
+          - module: "."
+            target: FuzzOpenAndRead
+          - module: "."
+            target: FuzzBytesCodec
+          - module: "."
+            target: FuzzGzipCodec
+          - module: "."
+            target: FuzzCRC32CCodec
+          - module: "."
+            target: FuzzShard
+          - module: "."
+            target: FuzzShardIndex
+          - module: "zstd"
+            target: FuzzDecode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      # A minute each: long enough to catch what a change broke, short enough
+      # to sit in front of a pull request. The corpus in testdata is run
+      # every time by `go test` regardless.
+      - name: fuzz
+        working-directory: ${{ matrix.module }}
+        # One package, not ./...: -fuzz refuses more than one, and the root
+        # module has storetest beside it.
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 60s .
+      - name: upload the input that failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: ${{ matrix.module }}/testdata/fuzz/
+          if-no-files-found: ignore

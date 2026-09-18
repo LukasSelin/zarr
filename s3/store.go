@@ -11,6 +11,10 @@
 // It is a zarr.DirLister as well, listing one level of a hierarchy with the
 // delimiter S3 rolls a level up by.
 //
+// A Store holds nothing of its own beyond what New was given, and the client
+// is safe to use from several goroutines at once, so a region read has as
+// many requests in flight as zarr.Array.Concurrency allows.
+//
 // A key that is not in the bucket is zarr.ErrNotFound, which an array reads
 // as a chunk of nothing but its fill value. S3 answers a GetObject of a key
 // that is not there with 403 Access Denied rather than 404, though, unless
