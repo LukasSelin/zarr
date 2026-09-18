@@ -123,7 +123,8 @@ reads them, and `List` does not yield them.
 `github.com/LukasSelin/zarr/s3` is a module of its own, so that the core
 needs nothing past the standard library. Its `Store` is a `RangeGetter`: a
 sharded array is read a shard's index and the chunks it needs at a time,
-and a shard's index at its end is one request.
+and a shard's index at its end is one request. It is a `DirLister` too,
+listing one level of a hierarchy with the delimiter S3 rolls a level up by.
 
 ```go
 cfg, _ := config.LoadDefaultConfig(ctx)
@@ -132,10 +133,10 @@ s := s3.New(awss3.NewFromConfig(cfg), "my-bucket", "fwi.zarr")
 
 S3 answers a read of a key that is not there with 403 rather than 404 unless
 the reader may `s3:ListBucket`, and a chunk never written is then an error
-rather than fill: grant it along with `s3:GetObject`. Both modules build
-with Go 1.23; the S3 module holds `aws-sdk-go-v2/service/s3` at v1.96.2, the
-last before it asked for Go 1.24, and a program that requires a later one
-gets that.
+rather than fill; `List` and `ListDir` do not work at all without it. Grant
+it along with `s3:GetObject`. Both modules build with Go 1.23; the S3
+module holds `aws-sdk-go-v2/service/s3` at v1.96.2, the last before it
+asked for Go 1.24, and a program that requires a later one gets that.
 
 ## zstd
 
