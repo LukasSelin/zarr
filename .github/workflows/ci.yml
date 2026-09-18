@@ -94,11 +94,21 @@ jobs:
         module: [".", "s3", "zstd"]
     steps:
       - uses: actions/checkout@v4
-      - uses: golang/govulncheck-action@v1
+      - uses: actions/setup-go@v5
         with:
-          go-version-input: ${{ env.GO_VERSION }}
-          work-dir: ${{ matrix.module }}
-          repo-checkout: false
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      # Not golang/govulncheck-action: it sets GOTOOLCHAIN=local, and
+      # building govulncheck now asks for a newer Go than the one these
+      # modules are meant to be read with, so installing it fails outright.
+      # go run fetches what the tool itself needs, while the analysis stays
+      # on the toolchain each go.mod asks for - which is the version whose
+      # standard library we want reported. Same command as `make vuln`.
+      - name: govulncheck
+        working-directory: ${{ matrix.module }}
+        env:
+          GOTOOLCHAIN: auto
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   fuzz:
     name: fuzz ${{ matrix.target }}
@@ -134,7 +144,9 @@ jobs:
       # every time by `go test` regardless.
       - name: fuzz
         working-directory: ${{ matrix.module }}
-        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 60s ./...
+        # One package, not ./...: -fuzz refuses more than one, and the root
+        # module has storetest beside it.
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 60s .
       - name: upload the input that failed
         if: failure()
         uses: actions/upload-artifact@v4
