@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -408,7 +409,7 @@ func (GzipCodec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 		}
 		n, err := r.Read(out[len(out):min(int64(cap(out)), limit)])
 		out = out[:len(out)+n]
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return out, nil
 		}
 		if err != nil {
