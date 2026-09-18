@@ -1,8 +1,11 @@
 package zarr
 
 import (
+	"context"
+	"fmt"
 	"math"
 	"testing"
+	"time"
 )
 
 // The benchmarks are on a 512 by 1024 float64 array in chunks of 64,
@@ -135,6 +138,55 @@ func BenchmarkWriteChunk(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	})
+}
+
+// latentStore is a store whose every call waits, as one across a network
+// does: a fifth of a millisecond here against the tens of milliseconds of an
+// object store, so that the benchmark is quick and the shape of it the same.
+type latentStore struct {
+	*MemoryStore
+	wait time.Duration
+}
+
+func (s latentStore) Get(ctx context.Context, key string) ([]byte, error) {
+	time.Sleep(s.wait)
+	return s.MemoryStore.Get(ctx, key)
+}
+
+func (s latentStore) GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	time.Sleep(s.wait)
+	return s.MemoryStore.GetRange(ctx, key, offset, length)
+}
+
+func eachConcurrency(b *testing.B, f func(b *testing.B, concurrency int)) {
+	for _, c := range []int{1, 4, 16, 64} {
+		b.Run(fmt.Sprint(c), func(b *testing.B) { f(b, c) })
+	}
+}
+
+// BenchmarkReadFromALatentStore reads the whole array from a store whose
+// round trip is what the chunks cost, which is what a read over a network
+// is: the number of them in flight is the whole of it.
+func BenchmarkReadFromALatentStore(b *testing.B) {
+	eachSharding(b, func(b *testing.B, sharded bool) {
+		s := latentStore{MemoryStore: NewMemoryStore(), wait: 200 * time.Microsecond}
+		benchArray(b, s, sharded)
+		eachConcurrency(b, func(b *testing.B, c int) {
+			a, err := OpenArray(ctx, s, "height")
+			if err != nil {
+				b.Fatal(err)
+			}
+			a.Concurrency = c
+			b.SetBytes(int64(8 * product(benchShape)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if _, err := Read[float64](ctx, a, nil, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	})
 }
 

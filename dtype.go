@@ -181,7 +181,7 @@ func parseFill(d DataType, raw json.RawMessage) (any, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, fmt.Errorf("zarr: an array must have a fill_value")
 	}
-	bad := func(err error) error { return fmt.Errorf("zarr: fill_value %s is not a %s: %v", raw, d, err) }
+	bad := func(err error) error { return fmt.Errorf("zarr: fill_value %s is not a %s: %w", raw, d, err) }
 	bits := d.Size() * 8
 	out := reflect.New(goType(d)).Elem()
 	switch {

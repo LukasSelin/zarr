@@ -153,7 +153,9 @@ func (Codec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 		}
 	}
 	defer func() {
-		d.Reset(nil)
+		// Reset to nil lets go of the reader before the decoder is pooled;
+		// there is nothing to be done about it failing.
+		_ = d.Reset(nil)
 		decoders.Put(d)
 	}()
 	// Decoded a block at a time, as a stream, so that the limit is kept to
@@ -194,7 +196,7 @@ func (Codec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 		}
 		n, err := d.Read(out[len(out):min(int64(cap(out)), limit)])
 		out = out[:len(out)+n]
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return out, nil
 		}
 		if err != nil {

@@ -28,6 +28,15 @@ func smallChunks(f *testing.F) {
 	f.Cleanup(func() { maxStoredBytes = old })
 }
 
+// someConcurrency has a fuzz test read a few chunks at a time rather than
+// the sixteen of an object store, so that the concurrent path is walked
+// without sixteen chunks of allocation to account for.
+func someConcurrency(f *testing.F) {
+	old := defaultConcurrency
+	defaultConcurrency = 4
+	f.Cleanup(func() { defaultConcurrency = old })
+}
+
 // allocLimit is the most a fuzz input may make the package allocate, beyond
 // a multiple of its own size: chunks of 1<<16 bytes are well within it, and
 // allocation without bound well past.
@@ -247,6 +256,7 @@ func readTyped[T Element](a *Array, start, n, chunk []int) {
 
 func FuzzOpenAndRead(f *testing.F) {
 	smallChunks(f)
+	someConcurrency(f)
 	s := seedStore(f)
 	for path, keys := range arrays(s) {
 		meta := must(s.Get(ctx, metadataKey(path)))

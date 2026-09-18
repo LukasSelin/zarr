@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -32,7 +33,9 @@ type ArrayBytesCodec interface {
 	DecodeArray(data []byte, spec ChunkSpec) (any, error)
 }
 
-// ChunkSpec is what a codec is told of the chunk it encodes or decodes.
+// ChunkSpec is what a codec is told of the chunk it encodes or decodes. A
+// codec may not keep it or change what it holds: several chunks of one array
+// are encoded and decoded at once, through the one spec.
 type ChunkSpec struct {
 	Shape    []int
 	DataType DataType
@@ -407,7 +410,7 @@ func (GzipCodec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 		}
 		n, err := r.Read(out[len(out):min(int64(cap(out)), limit)])
 		out = out[:len(out)+n]
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return out, nil
 		}
 		if err != nil {

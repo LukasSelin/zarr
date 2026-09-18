@@ -1,0 +1,4 @@
+# gofmt reads a CRLF as a formatting error, so everything text checks out with
+# LF on every platform, Windows included. Git detects what is text; anything
+# it takes for binary is left alone.
+* text=auto eol=lf

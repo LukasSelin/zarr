@@ -1,6 +1,12 @@
 package zarr
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"sort"
+	"strings"
+)
 
 // Group is a group in a store: a node that holds other nodes.
 type Group struct {
@@ -76,4 +82,59 @@ func (g *Group) CreateGroup(ctx context.Context, name string, attrs map[string]a
 // OpenGroup opens the group called name in the group.
 func (g *Group) OpenGroup(ctx context.Context, name string) (*Group, error) {
 	return OpenGroup(ctx, g.store, join(g.path, name))
+}
+
+// Child is a node directly in a group.
+type Child struct {
+	Name string
+	// Type is what the metadata of the node says it is, "array" or "group",
+	// and "" for metadata this package cannot read - which Delete removes
+	// all the same.
+	Type string
+}
+
+// Children is every node directly in the group, by name, sorted. It lists the
+// one level under the group and reads the metadata of each name it finds, so
+// it costs a listing and a read for each child rather than a walk of every
+// key under the group; a name with no metadata under it - the chunks of an
+// array, or a directory a delete left empty - is not a child.
+func (g *Group) Children(ctx context.Context) ([]Child, error) {
+	prefix := g.path
+	if prefix != "" {
+		prefix += "/"
+	}
+	var names []string
+	err := ListDir(ctx, g.store, prefix, func(name string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// A node always has a zarr.json under it, so a child is always a
+		// name with keys under it; the group's own zarr.json is not one.
+		if n, ok := strings.CutSuffix(name, "/"); ok && checkPath(join(g.path, n)) == nil {
+			names = append(names, n)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names) // a store lists in no particular order
+	var children []Child
+	for _, name := range names {
+		b, err := g.store.Get(ctx, metadataKey(join(g.path, name)))
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var head struct {
+			NodeType string `json:"node_type"`
+		}
+		// Metadata that does not parse has no type, and is a child anyway:
+		// finding it is how it is deleted.
+		_ = json.Unmarshal(b, &head)
+		children = append(children, Child{Name: name, Type: head.NodeType})
+	}
+	return children, nil
 }

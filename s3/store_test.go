@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/LukasSelin/zarr"
+	"github.com/LukasSelin/zarr/storetest"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -33,7 +35,10 @@ type fake struct {
 	// ignoreRange answers a ranged GetObject with the whole object, as a
 	// server that does not know ranges would.
 	ignoreRange bool
-	requests    []string
+	// pageSize, if more than 0, is how many names one ListObjectsV2 answers
+	// with before it truncates.
+	pageSize int
+	requests []string
 }
 
 func newFake() *fake { return &fake{bucket: "b", objects: map[string][]byte{}} }
@@ -123,6 +128,72 @@ func (f *fake) DeleteObject(_ context.Context, in *awss3.DeleteObjectInput, _ ..
 	return &awss3.DeleteObjectOutput{}, nil
 }
 
+// ListObjectsV2 answers as S3 does: the keys under the prefix in order, with
+// the ones that have the delimiter after the prefix rolled up into common
+// prefixes, a page at a time, the token being the last name of the page.
+func (f *fake) ListObjectsV2(_ context.Context, in *awss3.ListObjectsV2Input, _ ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
+	f.note("LIST " + aws.ToString(in.Prefix) + " " + aws.ToString(in.Delimiter))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if aws.ToString(in.Bucket) != f.bucket {
+		return nil, responseError(404, &smithy.GenericAPIError{Code: "NoSuchBucket"})
+	}
+	if f.noList {
+		return nil, responseError(403, &smithy.GenericAPIError{Code: "AccessDenied"})
+	}
+	prefix, delim := aws.ToString(in.Prefix), aws.ToString(in.Delimiter)
+	var keys []string
+	for k := range f.objects {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	// A name is a key, or the common prefix the delimiter rolls it up into.
+	type name struct {
+		s      string
+		common bool
+	}
+	var names []name
+	seen := map[string]bool{}
+	for _, k := range keys {
+		s, common := k, false
+		if delim != "" {
+			if i := strings.Index(k[len(prefix):], delim); i >= 0 {
+				s, common = k[:len(prefix)+i+len(delim)], true
+			}
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		names = append(names, name{s, common})
+	}
+	after := aws.ToString(in.ContinuationToken)
+	out := &awss3.ListObjectsV2Output{}
+	n := 0
+	for _, nm := range names {
+		if after != "" && nm.s <= after {
+			continue
+		}
+		if f.pageSize > 0 && n == f.pageSize {
+			out.IsTruncated = aws.Bool(true)
+			break
+		}
+		if nm.common {
+			out.CommonPrefixes = append(out.CommonPrefixes, types.CommonPrefix{Prefix: aws.String(nm.s)})
+		} else {
+			out.Contents = append(out.Contents, types.Object{Key: aws.String(nm.s), Size: aws.Int64(int64(len(f.objects[nm.s])))})
+		}
+		out.NextContinuationToken = aws.String(nm.s)
+		n++
+	}
+	if !aws.ToBool(out.IsTruncated) {
+		out.NextContinuationToken = nil
+	}
+	return out, nil
+}
+
 func (f *fake) count(prefix string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -155,11 +226,6 @@ func TestKeysAreObjectsUnderThePrefix(t *testing.T) {
 	}
 	if _, err := s.Get(ctx, "isi/c/0/1"); !errors.Is(err, zarr.ErrNotFound) {
 		t.Errorf("get of a deleted key: %v", err)
-	}
-	for _, bad := range []string{"", "/a", "a/", "a/../b", `a\b`, "a:b"} {
-		if err := s.Set(ctx, bad, nil); err == nil {
-			t.Errorf("set %q", bad)
-		}
 	}
 	whole := New(f, "b", "")
 	if err := whole.Set(ctx, "zarr.json", []byte("{}")); err != nil {
@@ -294,4 +360,147 @@ func TestAShardedArrayIsReadInRanges(t *testing.T) {
 			t.Errorf("a whole object was read: %q", r)
 		}
 	}
+}
+
+// listed is every key of the store under prefix, sorted.
+func listed(t *testing.T, s *Store, prefix string) []string {
+	t.Helper()
+	var keys []string
+	if err := s.List(ctx, prefix, func(key string) error {
+		keys = append(keys, key)
+		return nil
+	}); err != nil {
+		t.Fatalf("list %q: %v", prefix, err)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func TestListingObjectsUnderThePrefix(t *testing.T) {
+	f := newFake()
+	s := New(f, "b", "fwi.zarr")
+	for _, k := range []string{"zarr.json", "isi/zarr.json", "isi/c/0/0", "isi/c/0/1"} {
+		if err := s.Set(ctx, k, []byte(k)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// What is outside the store, and the directory marker a console makes,
+	// which no Set could have written.
+	f.objects["other.zarr/zarr.json"] = []byte("{}")
+	f.objects["fwi.zarr/isi/"] = nil
+
+	want := []string{"isi/c/0/0", "isi/c/0/1", "isi/zarr.json", "zarr.json"}
+	if got := listed(t, s, ""); !slices.Equal(got, want) {
+		t.Errorf("list = %v, want %v", got, want)
+	}
+	if got := listed(t, s, "isi/c/"); !slices.Equal(got, []string{"isi/c/0/0", "isi/c/0/1"}) {
+		t.Errorf("list of a prefix = %v", got)
+	}
+	if got := listed(t, s, "nothing/"); len(got) != 0 {
+		t.Errorf("list of a prefix with nothing under it = %v", got)
+	}
+	f.noList = true
+	if err := s.List(ctx, "", func(string) error { return nil }); err == nil {
+		t.Error("listing without s3:ListBucket was allowed")
+	}
+}
+
+func TestListingPagesThroughTheBucket(t *testing.T) {
+	f := newFake()
+	f.pageSize = 2
+	s := New(f, "b", "fwi.zarr")
+	var want []string
+	for i := range 5 {
+		k := fmt.Sprintf("isi/c/0/%d", i)
+		if err := s.Set(ctx, k, []byte(k)); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, k)
+	}
+	before := f.count("LIST")
+	if got := listed(t, s, ""); !slices.Equal(got, want) {
+		t.Errorf("list = %v, want %v", got, want)
+	}
+	if n := f.count("LIST") - before; n != 3 {
+		t.Errorf("%d requests for 5 keys at 2 a page, want 3", n)
+	}
+}
+
+func TestListingOneLevelRollsUpWithTheDelimiter(t *testing.T) {
+	f := newFake()
+	s := New(f, "b", "fwi.zarr")
+	for _, k := range []string{"zarr.json", "isi/zarr.json", "isi/c/0/0", "bui/zarr.json"} {
+		if err := s.Set(ctx, k, []byte(k)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		prefix string
+		want   []string
+	}{
+		{"", []string{"bui/", "isi/", "zarr.json"}},
+		{"isi/", []string{"c/", "zarr.json"}},
+	} {
+		var got []string
+		before := f.count("LIST")
+		if err := zarr.ListDir(ctx, s, c.prefix, func(name string) error {
+			got = append(got, name)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		slices.Sort(got)
+		if !slices.Equal(got, c.want) {
+			t.Errorf("one level of %q = %v, want %v", c.prefix, got, c.want)
+		}
+		// One level is one request, not one for every key under it.
+		if n := f.count("LIST") - before; n != 1 {
+			t.Errorf("one level of %q took %d requests", c.prefix, n)
+		}
+	}
+}
+
+func TestDeletingAnArrayInABucket(t *testing.T) {
+	f := newFake()
+	s := New(f, "b", "fwi.zarr")
+	if _, err := zarr.CreateGroup(ctx, s, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	a, err := zarr.CreateArray(ctx, s, "isi", zarr.ArrayOptions{
+		Shape: []int{4}, ChunkShape: []int{2}, DataType: zarr.Int32,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := zarr.Write(ctx, a, []int{0}, []int{4}, []int32{1, 2, 3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	f.requests = nil
+	if err := a.Delete(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The metadata goes first, so a delete that fails part way leaves keys
+	// nothing opens rather than an array reading as its fill value.
+	var deletes []string
+	for _, r := range f.requests {
+		if after, ok := strings.CutPrefix(r, "DELETE "); ok {
+			deletes = append(deletes, after)
+		}
+	}
+	if len(deletes) == 0 || deletes[0] != "fwi.zarr/isi/zarr.json" {
+		t.Errorf("deletes %v, want the metadata first", deletes)
+	}
+	if got := listed(t, s, "isi/"); len(got) != 0 {
+		t.Errorf("after deleting the array: %v", got)
+	}
+	if got := listed(t, s, ""); !slices.Equal(got, []string{"zarr.json"}) {
+		t.Errorf("the group around it: %v", got)
+	}
+}
+
+func TestAStoreInS3KeepsTheStoreContract(t *testing.T) {
+	storetest.Run(t, func() zarr.Store { return New(newFake(), "b", "fwi.zarr") })
+	t.Run("whole bucket", func(t *testing.T) {
+		storetest.Run(t, func() zarr.Store { return New(newFake(), "b", "") })
+	})
 }

@@ -8,12 +8,19 @@
 // It is a zarr.RangeGetter, so a sharded array is read a shard's index and
 // the chunks it needs at a time rather than a shard at a time.
 //
+// It is a zarr.DirLister as well, listing one level of a hierarchy with the
+// delimiter S3 rolls a level up by.
+//
+// A Store holds nothing of its own beyond what New was given, and the client
+// is safe to use from several goroutines at once, so a region read has as
+// many requests in flight as zarr.Array.Concurrency allows.
+//
 // A key that is not in the bucket is zarr.ErrNotFound, which an array reads
 // as a chunk of nothing but its fill value. S3 answers a GetObject of a key
 // that is not there with 403 Access Denied rather than 404, though, unless
 // whoever asks may s3:ListBucket on the bucket. Without that permission every
-// chunk never written is an error, not fill: grant s3:ListBucket along with
-// s3:GetObject.
+// chunk never written is an error, not fill, and List and ListDir do not work
+// at all: grant s3:ListBucket along with s3:GetObject.
 package s3
 
 import (
@@ -39,6 +46,7 @@ type Client interface {
 	HeadObject(ctx context.Context, in *awss3.HeadObjectInput, opts ...func(*awss3.Options)) (*awss3.HeadObjectOutput, error)
 	PutObject(ctx context.Context, in *awss3.PutObjectInput, opts ...func(*awss3.Options)) (*awss3.PutObjectOutput, error)
 	DeleteObject(ctx context.Context, in *awss3.DeleteObjectInput, opts ...func(*awss3.Options)) (*awss3.DeleteObjectOutput, error)
+	ListObjectsV2(ctx context.Context, in *awss3.ListObjectsV2Input, opts ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error)
 }
 
 // Store is a zarr.Store and zarr.RangeGetter of the objects in a bucket
@@ -167,6 +175,87 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// key is the store's key for an object, and whether the object is under the
+// store's prefix at all.
+func (s *Store) key(object string) (string, bool) {
+	if s.prefix == "" {
+		return object, true
+	}
+	return strings.CutPrefix(object, s.prefix+"/")
+}
+
+// pages walks the objects under prefix, with delimiter between the levels of
+// a key if it is not "", a page of them at a time.
+func (s *Store) pages(ctx context.Context, prefix, delim string, page func(*awss3.ListObjectsV2Output) error) error {
+	if err := zarr.ValidPrefix(prefix); err != nil {
+		return err
+	}
+	in := &awss3.ListObjectsV2Input{Bucket: &s.bucket, Prefix: s.object(prefix)}
+	if delim != "" {
+		in.Delimiter = aws.String(delim)
+	}
+	for {
+		out, err := s.client.ListObjectsV2(ctx, in)
+		if err != nil {
+			return s.fail(prefix, err)
+		}
+		if err := page(out); err != nil {
+			return err
+		}
+		if !aws.ToBool(out.IsTruncated) || aws.ToString(out.NextContinuationToken) == "" {
+			return nil
+		}
+		in.ContinuationToken = out.NextContinuationToken
+	}
+}
+
+// List walks the objects under the prefix, a page of a thousand at a time.
+// It needs s3:ListBucket, which reading a store already wants: without it
+// every key never written is an error rather than the fill value.
+func (s *Store) List(ctx context.Context, prefix string, fn func(key string) error) error {
+	return s.pages(ctx, prefix, "", func(out *awss3.ListObjectsV2Output) error {
+		for _, o := range out.Contents {
+			key, ok := s.key(aws.ToString(o.Key))
+			if !ok || zarr.ValidKey(key) != nil {
+				// An object no Set could have written, such as the
+				// directory marker a console makes, whose key ends in "/".
+				continue
+			}
+			if err := fn(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ListDir walks one level, with the delimiter S3 rolls a level up by, so a
+// group is listed without reading the keys of the arrays under it.
+func (s *Store) ListDir(ctx context.Context, prefix string, fn func(name string) error) error {
+	return s.pages(ctx, prefix, "/", func(out *awss3.ListObjectsV2Output) error {
+		for _, p := range out.CommonPrefixes {
+			key, ok := s.key(aws.ToString(p.Prefix))
+			if !ok {
+				continue
+			}
+			// A common prefix carries the delimiter already.
+			if err := fn(strings.TrimPrefix(key, prefix)); err != nil {
+				return err
+			}
+		}
+		for _, o := range out.Contents {
+			key, ok := s.key(aws.ToString(o.Key))
+			if !ok || zarr.ValidKey(key) != nil {
+				continue
+			}
+			if err := fn(strings.TrimPrefix(key, prefix)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // fail is err from S3 about key as the store's error: zarr.ErrNotFound for a
 // key that is not there, and never for a bucket that is not.
 func (s *Store) fail(key string, err error) error {
@@ -197,5 +286,6 @@ func status(err error) int {
 var (
 	_ zarr.Store       = (*Store)(nil)
 	_ zarr.RangeGetter = (*Store)(nil)
+	_ zarr.DirLister   = (*Store)(nil)
 	_ Client           = (*awss3.Client)(nil)
 )
