@@ -8,9 +8,6 @@ and kept under its own key: `height/zarr.json` says what the array is, and
 an object store or memory, and it can be read from Python (`zarr`,
 `xarray`), JavaScript, Rust and Julia.
 
-It began inside [terra](https://github.com/LukasSelin/terra), whose
-`cmd/zarr` writes worlds with it, and keeps its history from there.
-
 ```go
 s := zarr.NewDirStore("world.zarr")
 root, _ := zarr.CreateGroup(ctx, s, "", map[string]any{"seed": seed})
