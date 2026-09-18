@@ -3,7 +3,7 @@ module github.com/LukasSelin/zarr/s3
 go 1.23
 
 require (
-	github.com/LukasSelin/zarr v0.2.0
+	github.com/LukasSelin/zarr v0.3.0
 	github.com/aws/aws-sdk-go-v2 v1.41.2
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.2
 	github.com/aws/smithy-go v1.24.1
