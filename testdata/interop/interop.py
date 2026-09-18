@@ -16,6 +16,7 @@ import sys
 import numpy as np
 import zarr
 from zarr.codecs import BytesCodec, Crc32cCodec, GzipCodec, ShardingCodec
+from zarr.codecs.numcodecs import Shuffle
 
 HERE = pathlib.Path(__file__).parent
 CASES = json.loads((HERE / "cases.json").read_text())
@@ -27,6 +28,14 @@ def fill_of(case):
     if isinstance(f, str):
         return {"NaN": math.nan, "Infinity": math.inf, "-Infinity": -math.inf}[f]
     return f
+
+
+def compressor_of(name, dtype):
+    if name == "gzip":
+        return GzipCodec(level=5)
+    if name == "shuffle":
+        return Shuffle(elementsize=np.dtype(dtype).itemsize)
+    return Crc32cCodec()
 
 
 def expected(case):
@@ -54,7 +63,7 @@ def write(path):
         name = case["name"]
         if "/" in name:
             root.require_group(name.rsplit("/", 1)[0])
-        compressors = [GzipCodec(level=5) if c == "gzip" else Crc32cCodec() for c in case["compressors"]]
+        compressors = [compressor_of(c, case["dtype"]) for c in case["compressors"]]
         serializer = BytesCodec(endian=case["endian"])
         chunks, shards = tuple(case["chunks"]), None
         sharding = case.get("sharding")

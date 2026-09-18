@@ -145,9 +145,12 @@ func checkInterop[T Element](t *testing.T, s Store, c interopCase) {
 func writeInterop[T Element](t testing.TB, s Store, c interopCase) {
 	codecs := []Codec{BytesCodec{Endian: c.Endian}}
 	for _, name := range c.Compressors {
-		if name == "gzip" {
+		switch name {
+		case "gzip":
 			codecs = append(codecs, GzipCodec{Level: 5})
-		} else {
+		case "shuffle":
+			codecs = append(codecs, ShuffleCodec{ElementSize: c.DataType.Size()})
+		default:
 			codecs = append(codecs, CRC32CCodec{})
 		}
 	}

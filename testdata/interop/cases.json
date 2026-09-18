@@ -8,6 +8,7 @@
   {"name": "uint8_plain", "dtype": "uint8", "shape": [3, 130], "chunks": [2, 64], "fill": 255, "endian": null, "compressors": [], "separator": "/"},
   {"name": "int8_scalar", "dtype": "int8", "shape": [], "chunks": [], "fill": 0, "endian": null, "compressors": [], "separator": "/"},
   {"name": "nested/uint32", "dtype": "uint32", "shape": [6, 6], "chunks": [6, 6], "fill": 1, "endian": "little", "compressors": ["crc32c"], "separator": "/"},
+  {"name": "float64_shuffle", "dtype": "float64", "shape": [6, 8], "chunks": [3, 4], "fill": 0, "endian": "little", "compressors": ["shuffle", "gzip"], "separator": "/"},
   {"name": "sharded_float32", "dtype": "float32", "shape": [37, 50], "chunks": [4, 5], "fill": "NaN", "endian": "little", "compressors": ["gzip"], "separator": "/", "sharding": {"shape": [16, 20], "index_location": "end"}, "dimension_names": ["y", "x"]},
   {"name": "sharded_index_first", "dtype": "int32", "shape": [9, 9, 4], "chunks": [3, 3, 2], "fill": -5, "endian": "big", "compressors": [], "separator": "/", "sharding": {"shape": [6, 9, 4], "index_location": "start"}},
   {"name": "sharded_then_gzip", "dtype": "uint16", "shape": [30], "chunks": [3], "fill": 0, "endian": "little", "compressors": ["crc32c"], "separator": ".", "sharding": {"shape": [12], "index_location": "end", "after": ["gzip"]}}

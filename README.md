@@ -38,6 +38,7 @@ row, err := zarr.Read[float32](ctx, h, []int{100, 0}, []int{1, 1024})
 | `gzip`, `crc32c` codecs | yes |
 | `zstd` | in [`zstd`](zstd), a module of its own |
 | `blosc` | not in the standard library; register one with `RegisterCodec` |
+| `numcodecs.shuffle`, which the specification does not have | yes: `ShuffleCodec`, as zarr-python's `zarr.codecs.numcodecs.Shuffle` |
 | `transpose` codec | no |
 | `sharding_indexed` codec, index at either end | yes: `ArrayOptions.ShardShape`, or a `ShardingCodec` of your own |
 | Extensions with `must_understand: false` | ignored, as the specification allows |
@@ -106,6 +107,26 @@ too: one that is a `LimitedBytesDecoder` is told the most a chunk may
 decode to, and one that is a `BoundedBytesEncoder` says the most it
 encodes to, for the codecs after it.
 
+## Shuffle
+
+A compressor sees a float field as elements that differ in every byte. The
+shuffle codec lays the bytes out by their place in an element instead - every
+first byte, then every second - so that the high bytes of a smooth field,
+which hardly change, become long runs that deflate well:
+
+```go
+Codecs: []zarr.Codec{
+	zarr.BytesCodec{Endian: zarr.Little},
+	zarr.ShuffleCodec{ElementSize: zarr.Float32.Size()},
+	zarr.GzipCodec{Level: 5},
+},
+```
+
+`ElementSize` has to be given because a bytes-to-bytes codec is handed
+nothing but bytes: it cannot be told the data type. It is
+`numcodecs.shuffle`, which the version 3 core specification does not have and
+zarr-python writes as `zarr.codecs.numcodecs.Shuffle`.
+
 ## Shards
 
 One object a chunk is a great many files at scale: a 16 000 by 8 000 map in
@@ -150,17 +171,18 @@ go test -run '^$' -fuzz '^FuzzOpenAndRead$' -fuzztime 5m .
 
 `bench_test.go` has Write and Read of a 512 by 1024 float64 array in chunks
 of 64 at gzip 5, with and without shards of 16 chunks, a 3 by 3 region from
-shards in a directory, and ReadChunk and WriteChunk.
+shards in a directory, ReadChunk and WriteChunk, and a chunk shuffled and
+unshuffled.
 
 ## Against zarr-python
 
 `TestZarrPython` has zarr-python write every case in
 `testdata/interop/cases.json` for this package to read, and reads back with
 zarr-python every case this package writes: every data type, both endians,
-gzip and crc32c alone and together, NaN and infinite fills, both
-separators, a scalar, a nested group, dimension names, a `uint64`
-attribute, and shards with the index at the end, at the start, and with a
-codec after the shard. It is skipped unless `ZARR_PYTHON` names a Python with `zarr`
+gzip, crc32c and `numcodecs.shuffle` alone and together, NaN and infinite
+fills, both separators, a scalar, a nested group, dimension names, a
+`uint64` attribute, and shards with the index at the end, at the start, and
+with a codec after the shard. It is skipped unless `ZARR_PYTHON` names a Python with `zarr`
 and `numpy`:
 
 ```sh
@@ -168,4 +190,4 @@ python -m venv .venv && .venv/bin/pip install zarr numpy
 ZARR_PYTHON=.venv/bin/python go test -run ZarrPython .
 ```
 
-Last run against zarr-python 3.4.0, numpy 2.5.3.
+Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.

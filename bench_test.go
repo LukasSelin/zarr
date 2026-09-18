@@ -137,3 +137,37 @@ func BenchmarkWriteChunk(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkShuffle is one chunk of the benchmark array, 64 by 64 float64,
+// shuffled and unshuffled: what the codec costs a chunk that gzip then
+// compresses.
+func BenchmarkShuffle(b *testing.B) {
+	c := ShuffleCodec{ElementSize: 8}
+	spec := ChunkSpec{Shape: []int{64, 64}, DataType: Float64}
+	chunk, err := BytesCodec{Endian: Little}.EncodeArray(benchData()[:64*64], spec)
+	if err != nil {
+		b.Fatal(err)
+	}
+	shuffled, err := c.EncodeBytes(chunk)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Run("encode", func(b *testing.B) {
+		b.SetBytes(int64(len(chunk)))
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := c.EncodeBytes(chunk); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("decode", func(b *testing.B) {
+		b.SetBytes(int64(len(shuffled)))
+		b.ReportAllocs()
+		for range b.N {
+			if _, err := c.DecodeBytes(shuffled); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

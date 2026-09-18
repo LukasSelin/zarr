@@ -74,6 +74,7 @@ func init() {
 	RegisterCodec("gzip", parseGzip)
 	RegisterCodec("sharding_indexed", parseSharding)
 	RegisterCodec("crc32c", func(json.RawMessage, DataType) (Codec, error) { return CRC32CCodec{}, nil })
+	RegisterCodec("numcodecs.shuffle", parseShuffle)
 }
 
 func parseCodec(n Named, d DataType) (Codec, error) {
