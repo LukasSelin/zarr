@@ -8,9 +8,6 @@ and kept under its own key: `height/zarr.json` says what the array is, and
 an object store or memory, and it can be read from Python (`zarr`,
 `xarray`), JavaScript, Rust and Julia.
 
-It began inside [terra](https://github.com/LukasSelin/terra), whose
-`cmd/zarr` writes worlds with it, and keeps its history from there.
-
 ```go
 s := zarr.NewDirStore("world.zarr")
 root, _ := zarr.CreateGroup(ctx, s, "", map[string]any{"seed": seed})
@@ -69,14 +66,65 @@ the new end and fills the ones it cuts through before writing the metadata.
 A handle on the array keeps its shape until `Refresh`, and nothing stops two
 writers growing one array at once: one of them would lose.
 
+## Walking and deleting
+
+`Store.List` calls a function with every key under a prefix, so a hierarchy
+can be walked without holding all of it:
+
+```go
+var bytes int
+err := s.List(ctx, "fwi/", func(key string) error {
+	b, err := s.Get(ctx, key)
+	bytes += len(b)
+	return err
+})
+```
+
+A prefix is a string and not a path: `"height"` is also the keys of
+`"heightmap"`, and `""` is everything the store holds. Pass `path + "/"` for
+everything under a node.
+
+One level at a time is `zarr.ListDir`, which uses the store's own `ListDir`
+where there is one - a bucket rolls a level up with a delimiter, a directory
+reads one directory - and derives it from `List` where there is not, reading
+every key under the prefix to do it. `Group.Children` is the nodes directly
+in a group, with what each one is:
+
+```go
+for _, c := range children { // [{fwi array} {isi array} {sub group}]
+	fmt.Println(c.Name, c.Type)
+}
+```
+
+It costs a listing and a read of the metadata of each name, not a walk of
+every chunk under the group.
+
+`Delete` removes a node and everything under it:
+
+```go
+err := zarr.Delete(ctx, s, "fwi/isi") // or isi.Delete(ctx), root.Delete(ctx)
+```
+
+The metadata goes first, so a delete that fails part way leaves keys that
+nothing opens rather than an array whose missing chunks read as the fill
+value; doing it again clears what was left. It never reads the metadata, so
+a node this package cannot open goes too. The root, `""`, is the whole
+store. A `DirStore` keeps the directories a node was in, empty; nothing
+reads them, and `List` does not yield them.
+
+`Store` gained `List` in v0.3.0. A store of your own needs it, and may add
+`ListDir`; `storetest.Run` checks either against the contract.
+
 ## Stores in S3
 
 `github.com/LukasSelin/zarr/s3` is a module of its own, so that the core
 needs nothing past the standard library. Its `Store` is a `RangeGetter`: a
 sharded array is read a shard's index and the chunks it needs at a time,
-and a shard's index at its end is one request. A region read has as many
-requests in flight as `Array.Concurrency`, so the 30 to 50 ms of a GET is
-waited out sixteen keys at a time by default rather than one.
+and a shard's index at its end is one request. It is a `DirLister` too,
+listing one level of a hierarchy with the delimiter S3 rolls a level up by.
+A region read has as many requests in flight as `Array.Concurrency`, so the
+30 to 50 ms of a GET is waited out sixteen keys at a time by default rather
+than one.
 
 ```go
 cfg, _ := config.LoadDefaultConfig(ctx)
@@ -85,10 +133,12 @@ s := s3.New(awss3.NewFromConfig(cfg), "my-bucket", "fwi.zarr")
 
 S3 answers a read of a key that is not there with 403 rather than 404 unless
 the reader may `s3:ListBucket`, and a chunk never written is then an error
-rather than fill: grant it along with `s3:GetObject`. Both modules build
-with Go 1.23; the S3 module holds `aws-sdk-go-v2/service/s3` at v1.96.2, the
-last before it asked for Go 1.24, and a program that requires a later one
-gets that.
+rather than fill; `List` and `ListDir` do not work at all without it. Grant
+it along with `s3:GetObject`. The core builds with Go 1.23; the S3 module
+needs 1.24. It held `aws-sdk-go-v2/service/s3` at v1.96.2, the last before
+the SDK asked for 1.24, until govulncheck found GO-2026-5764 in the
+eventstream protocol under it: the fix is service/s3 v1.97.3, which asks
+for 1.24, so that is what the module builds with now.
 
 ## zstd
 

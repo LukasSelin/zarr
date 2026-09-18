@@ -23,6 +23,14 @@
 // ReadChunk and WriteChunk, whose element type must be the array's data
 // type. Elements are in C order: the last dimension varies fastest.
 //
+// The keys of a store are walked with Store.List, a prefix at a time, and one
+// level of them with ListDir, which a store that can do it cheaply - a
+// directory, a bucket - answers in one request. Group.Children is the nodes
+// directly in a group. Delete removes a node and everything under it, its
+// metadata first, so that a delete that fails part way leaves keys that
+// nothing opens rather than an array whose missing chunks read as the fill
+// value.
+//
 // Read, Write, Resize and Append work on up to Array.Concurrency stored
 // objects at once - sixteen by default - so that the round trip of an object
 // store is waited out many keys at a time rather than one. A Store's methods
