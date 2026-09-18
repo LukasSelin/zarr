@@ -14,6 +14,10 @@
 //   - the default and v2 chunk key encodings;
 //   - the codecs bytes, gzip, crc32c and sharding_indexed.
 //
+// Past the core it has numcodecs.shuffle, which the specification does not
+// have and zarr-python writes as zarr.codecs.numcodecs.Shuffle: ShuffleCodec
+// lays bytes out by their place in an element for the compressor after it.
+//
 // Other codecs can be registered with RegisterCodec. zstd, which the
 // standard library does not have, is in the module
 // github.com/LukasSelin/zarr/zstd. Not yet here: transpose, float16,

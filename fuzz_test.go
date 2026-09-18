@@ -78,6 +78,10 @@ func seedStore(f *testing.F) *MemoryStore {
 			Codecs: []Codec{&ShardingCodec{ChunkShape: []int{2}, Codecs: []Codec{BytesCodec{Endian: Big}, CRC32CCodec{}}, IndexLocation: IndexStart}}},
 		"x/v2": {Shape: []int{5, 5}, ChunkShape: []int{2, 2}, DataType: Int32, Separator: ".",
 			Codecs: []Codec{BytesCodec{Endian: Little}, CRC32CCodec{}, GzipCodec{Level: 9}}},
+		// A checksum before the shuffle leaves four bytes past the last whole
+		// element of a 4 by 6 float64 chunk.
+		"x/shuffled": {Shape: []int{9, 7}, ChunkShape: []int{4, 6}, DataType: Float64, FillValue: 0.5,
+			Codecs: []Codec{BytesCodec{Endian: Little}, CRC32CCodec{}, ShuffleCodec{ElementSize: 8}}},
 	} {
 		if _, err := OpenGroup(ctx, s, "x"); err != nil {
 			if _, err := CreateGroup(ctx, s, "x", nil); err != nil {
@@ -341,6 +345,34 @@ func FuzzGzipCodec(f *testing.F) {
 			}
 			if out, err := (GzipCodec{}).DecodeBytes(data); err == nil && int64(len(out)) > maxStoredBytes {
 				t.Fatalf("inflated to %d bytes, past a chunk", len(out))
+			}
+		})
+	})
+}
+
+func FuzzShuffleCodec(f *testing.F) {
+	for _, size := range []int{0, 1, 4, 8} {
+		f.Add(must(ShuffleCodec{ElementSize: size}.EncodeBytes(bytes.Repeat([]byte("zarr"), 100))), uint32(size))
+		f.Add(must(ShuffleCodec{ElementSize: size}.EncodeBytes(nil)), uint32(size))
+	}
+	f.Add([]byte{1, 2, 3}, uint32(2))
+	// An element size of more bytes than there are must not be looped over.
+	f.Add([]byte("zarr"), uint32(1<<31))
+	f.Fuzz(func(t *testing.T, data []byte, size uint32) {
+		c := ShuffleCodec{ElementSize: int(size)}
+		checkAllocated(t, len(data), func() {
+			out, err := c.DecodeBytes(data)
+			if err != nil {
+				return
+			}
+			if len(out) != len(data) {
+				t.Fatalf("%d bytes decoded to %d", len(data), len(out))
+			}
+			if back := must(c.EncodeBytes(out)); !bytes.Equal(back, data) {
+				t.Fatalf("decoded and encoded again to\n%x\nnot\n%x", back, data)
+			}
+			if _, err := c.DecodeBytesLimit(data, int64(len(data))-1); err == nil && len(data) > 0 {
+				t.Fatalf("%d bytes decoded within a limit of %d", len(data), len(data)-1)
 			}
 		})
 	})
