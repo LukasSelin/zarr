@@ -1,0 +1,114 @@
+# Shared by every module here: the root, s3 and zstd. Run it from a module's
+# own directory, or use `make lint`, which walks all three.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck and unused.
+  default: standard
+  enable:
+    - bodyclose      # an HTTP body left open is a leaked connection
+    - contextcheck   # a call that should carry the ctx it was given
+    - copyloopvar
+    - durationcheck  # two durations multiplied together
+    - errorlint      # comparisons and %v that should be errors.Is and %w
+    - gocritic
+    - gosec
+    - makezero       # make([]T, n) then append, which keeps the zeros
+    - nilerr         # return nil where err is not nil
+    - noctx          # a request made without a context
+    - predeclared    # shadowing len, cap, min, max and the rest
+    - revive
+    - unconvert
+    - usestdlibvars  # http.MethodGet rather than "GET"
+    - wastedassign
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        # Field order is written for how the structs read, not for padding.
+        - fieldalignment
+        # `if err := f(); err != nil` shadows an outer err by design, and it
+        # is how nearly every error is handled here.
+        - shadow
+    gocritic:
+      # Bugs, not taste: the style and performance tags argue with how this
+      # code is written on purpose - options structs passed by value, results
+      # left unnamed - and say nothing about whether it is correct.
+      enabled-tags:
+        - diagnostic
+      disabled-checks:
+        # `f != f` is how a NaN fill value is found, in filled and allFill.
+        - dupSubExpr
+    gosec:
+      excludes:
+        # Chunk keys and store paths are built from the store's own root and
+        # the caller's array name; the packages take a path because that is
+        # what a store is.
+        - G304
+        # Every conversion it finds here is already bounded - by len, by a
+        # checkIndex against MaxInt64, or by the bit width ParseUint was
+        # given. The untrusted numbers out of metadata are bounded in
+        # limit.go instead, which is where that belongs.
+        - G115
+    revive:
+      rules:
+        - name: exported
+          disabled: true  # doc comments are reviewed by hand here
+        - name: package-comments
+          disabled: true
+        - name: indent-error-flow
+        - name: errorf
+        - name: error-return
+        - name: error-strings
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: unreachable-code
+        - name: waitgroup-by-value
+        - name: defer
+        - name: range-val-address
+        - name: unused-parameter
+          disabled: true
+    staticcheck:
+      checks:
+        - all
+        # Doc comments are written as prose here and reviewed by hand.
+        - -ST1000
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # Initialisms in names follow the specification's spelling.
+        - -ST1003
+        - -ST1016
+        # De Morgan's law: `!(nan && v != v)` says what it means.
+        - -QF1001
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Tests deliberately write fixed permissions, build paths from names and
+      # ignore the error of a close whose write already failed.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - noctx
+          - contextcheck
+      # A fuzz corpus and the interop fixtures are data, not code to lint.
+      - path: testdata/
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

@@ -192,3 +192,39 @@ ZARR_PYTHON=.venv/bin/python go test -run ZarrPython .
 ```
 
 Last run against zarr-python 3.4.0, numpy 2.5.3.
+
+## Checks
+
+`make check` runs what CI runs, over all three modules - the root, `s3` and
+`zstd` - and `make tools` installs the two that are not in the toolchain:
+
+| Check | What it is for |
+|---|---|
+| `make fmt-check` | gofmt, in every module |
+| `make lint` | golangci-lint, configured by `.golangci.yml` at the root |
+| `make test` | `go test -race`, every module |
+| `make vuln` | govulncheck, against the modules and the standard library |
+| `make fuzz` | each fuzz target for `FUZZTIME`, 30s by default |
+| `make tidy` | `go mod tidy` in each module |
+
+Every package's `TestMain` verifies with
+[goleak](https://github.com/uber-go/goleak) that no test left a goroutine
+running: `Read`, `Write` and `Resize` start a worker per stored object and
+must gather every one of them back, whether the work finished, a chunk
+failed to decode, or the caller's context was cancelled. With `-race`
+beside it, goleak says a goroutine outlived its call and the detector says
+what it touched while it did.
+
+govulncheck reports the standard library as well as the modules, so a Go
+toolchain behind on its patch releases shows up as a finding of its own.
+Each `go.mod` asks for `go1.25.13` by its `toolchain` line and CI pins the
+same, so a build here and a build on a laptop are the same build; the
+`toolchain` line is ignored in a module that is not the main one, so it
+asks nothing of anyone who imports this. CI runs the scan weekly as well as
+on every push, because a vulnerability is usually published long after the
+code that has it was written.
+
+The linters beyond the default set are chosen for what breaks rather than
+for taste: `bodyclose`, `contextcheck`, `errorlint`, `gosec`, `makezero`,
+`nilerr` and `noctx`, with gocritic held to its `diagnostic` tag.
+`.golangci.yml` says why each exclusion is there.
