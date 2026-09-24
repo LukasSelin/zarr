@@ -141,11 +141,13 @@ func refill(ctx context.Context, a, b *Array, sidx []int) error {
 }
 
 func refillAs[T Element](ctx context.Context, a, b *Array, sidx []int) error {
-	buf, err := readStored[T](ctx, a, sidx)
-	if err != nil {
-		return err
-	}
-	return writeStored(ctx, b, sidx, buf, true)
+	return a.exclusive(ctx, sidx, func() error {
+		buf, err := readStored[T](ctx, a, sidx)
+		if err != nil {
+			return err
+		}
+		return writeStored(ctx, b, sidx, buf, true)
+	})
 }
 
 // Append writes data after the end of the array along axis, and grows the

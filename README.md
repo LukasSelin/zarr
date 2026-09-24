@@ -220,6 +220,14 @@ ranges wants a smaller number. The order chunks are fetched in is not
 defined, and a `Write` that fails part way has written some of the stored
 objects it covers and not others.
 
+Regions that do not overlap may be written from as many goroutines as you
+like, through one handle on the array or several, even where they share a
+chunk or a shard: a `Write` that covers part of a stored object reads it,
+patches it and writes it back under a lock of that object's own. The lock
+is in the process, so two processes - or two machines - writing regions
+that share a stored object can still lose one of them; split such work
+along `ChunkShape`, or `ShardShape` if the array is sharded.
+
 ## Stores that are not trusted
 
 Metadata, chunks and shards that are malformed are an error, never a

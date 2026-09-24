@@ -335,16 +335,18 @@ func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) e
 		return fmt.Errorf("zarr: chunk of %d elements, not %d", len(data), product(a.chunks))
 	}
 	if a.shard == nil {
-		return writeStored(ctx, a, idx, data, false)
+		return a.exclusive(ctx, idx, func() error { return writeStored(ctx, a, idx, data, false) })
 	}
 	sidx := a.shardOf(idx)
-	buf, err := readStored[T](ctx, a, sidx)
-	if err != nil {
-		return err
-	}
-	at := times(minus(idx, times(sidx, a.perShard)), a.chunks)
-	copyBlock(buf, a.grid, at, data, a.chunks, make([]int, len(idx)), a.chunks)
-	return writeStored(ctx, a, sidx, buf, true)
+	return a.exclusive(ctx, sidx, func() error {
+		buf, err := readStored[T](ctx, a, sidx)
+		if err != nil {
+			return err
+		}
+		at := times(minus(idx, times(sidx, a.perShard)), a.chunks)
+		copyBlock(buf, a.grid, at, data, a.chunks, make([]int, len(idx)), a.chunks)
+		return writeStored(ctx, a, sidx, buf, true)
+	})
 }
 
 // storedSpec is the spec of a stored object, and is the same one for every
@@ -626,6 +628,12 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 // only part of is read and written back. A Write that fails part way has
 // written some of the stored objects the region covers and not others, in no
 // particular order.
+//
+// Writes of regions that do not overlap may run at once from any number of
+// goroutines, through one handle on the array or several, even where they
+// share a chunk or a shard: each stored object is read, patched and written
+// back under a lock of its own in this process. Nothing holds writers in
+// other processes apart; see the package documentation.
 func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []T) error {
 	if err := checkType[T](a); err != nil {
 		return err
@@ -642,18 +650,21 @@ func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []
 	}
 	// No two of the stored objects the region covers are the same one, so
 	// they are read, patched and written in as many goroutines as the array
-	// allows.
+	// allows. Another Write may be patching one of them too, a region beside
+	// this one that shares the chunk, so each is held while it is.
 	return eachSpan(ctx, a.limit(spanLen(lo, hi)), lo, hi, func(ctx context.Context, _ int, sidx []int) error {
-		at, n, whole := a.overlap(sidx, start, shape, a.grid)
-		var buf []T
-		var err error
-		if whole {
-			buf = filled(product(a.grid), a.fill.(T))
-		} else if buf, err = readStored[T](ctx, a, sidx); err != nil {
-			return err
-		}
-		copyBlock(buf, a.grid, minus(at, times(sidx, a.grid)), data, shape, minus(at, start), n)
-		return writeStored(ctx, a, sidx, buf, true)
+		return a.exclusive(ctx, sidx, func() error {
+			at, n, whole := a.overlap(sidx, start, shape, a.grid)
+			var buf []T
+			var err error
+			if whole {
+				buf = filled(product(a.grid), a.fill.(T))
+			} else if buf, err = readStored[T](ctx, a, sidx); err != nil {
+				return err
+			}
+			copyBlock(buf, a.grid, minus(at, times(sidx, a.grid)), data, shape, minus(at, start), n)
+			return writeStored(ctx, a, sidx, buf, true)
+		})
 	})
 }
 

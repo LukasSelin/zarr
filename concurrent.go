@@ -61,6 +61,72 @@ func spanOf(lo, hi, idx []int) int {
 	return n
 }
 
+// storedLocks is a lock for each stored object being read, patched and
+// written back, by its key, for the whole process: two handles on one array
+// share them. A key's lock exists while someone holds or waits for it.
+//
+// Nothing takes two of them at once - a Write takes each stored object's in
+// turn, in whichever goroutine is working on it, and lets it go before the
+// next - so there is no order to keep them in and nothing to deadlock on.
+// Keys are shared across stores, so two stores that happen to use one key
+// wait for each other when writing it; they never lose anything by it.
+var storedLocks = keyLocks{held: map[string]*keyLock{}}
+
+type keyLocks struct {
+	mu   sync.Mutex
+	held map[string]*keyLock
+}
+
+// keyLock is held while its channel is full. users is how many hold it or
+// wait for it, under keyLocks.mu.
+type keyLock struct {
+	ch    chan struct{}
+	users int
+}
+
+// lock takes the lock of key, waiting for it no longer than ctx lasts, and
+// returns what lets it go.
+func (l *keyLocks) lock(ctx context.Context, key string) (unlock func(), err error) {
+	l.mu.Lock()
+	k := l.held[key]
+	if k == nil {
+		k = &keyLock{ch: make(chan struct{}, 1)}
+		l.held[key] = k
+	}
+	k.users++
+	l.mu.Unlock()
+	select {
+	case k.ch <- struct{}{}:
+		return func() {
+			<-k.ch
+			l.release(key, k)
+		}, nil
+	case <-ctx.Done():
+		l.release(key, k)
+		return nil, ctx.Err()
+	}
+}
+
+func (l *keyLocks) release(key string, k *keyLock) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if k.users--; k.users == 0 {
+		delete(l.held, key)
+	}
+}
+
+// exclusive calls f holding the lock of the stored object at sidx, so that
+// what f reads of it is not written by anyone else in this process before f
+// writes it back.
+func (a *Array) exclusive(ctx context.Context, sidx []int, f func() error) error {
+	unlock, err := storedLocks.lock(ctx, a.storedKey(sidx))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return f()
+}
+
 // eachSpan calls f with every index from lo to hi inclusive, in up to limit
 // goroutines at once, and returns the error of the first call that failed. n
 // is where the index falls in eachIndex's order, so that f may keep what it
