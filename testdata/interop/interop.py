@@ -92,7 +92,11 @@ def write(path):
             dimension_names=case.get("dimension_names"),
         )
         arr[...] = expected(case)
-    print(f"wrote {len(CASES)} arrays")
+    # A Zarr version 2 group and array beside the rest, which zarr.Go must
+    # refuse as version 2 rather than as not there.
+    v2 = zarr.open_group(pathlib.Path(path) / "v2", mode="w", zarr_format=2, attributes={"format": 2})
+    v2.create_array("a", shape=(5,), chunks=(2,), dtype="int32", fill_value=0)[...] = np.arange(5, dtype="int32")
+    print(f"wrote {len(CASES)} arrays, and a version 2 group")
 
 
 def read(path):

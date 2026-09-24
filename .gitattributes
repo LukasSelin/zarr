@@ -2,3 +2,7 @@
 # LF on every platform, Windows included. Git detects what is text; anything
 # it takes for binary is left alone.
 * text=auto eol=lf
+
+# The chunks of the Zarr version 2 store in testdata are bytes, not text,
+# whatever git would take them for.
+testdata/v2/**/[0-9]* binary
