@@ -431,3 +431,96 @@ func TestASpanCountsTheIndicesEachIndexWalks(t *testing.T) {
 		}
 	}
 }
+
+// Tiles that do not line up with the chunks, written from a goroutine each:
+// no two tiles overlap, but most chunks - and every shard - are shared by
+// several of them, each of which reads the stored object, patches its part
+// and writes it back. Every element must hold what its own tile wrote, with
+// the tiles written through one handle on the array or through two.
+func TestDisjointWritesFromManyGoroutinesSharingAChunkAllLand(t *testing.T) {
+	shape, tile := []int{30, 42}, []int{4, 5}
+	for _, sharded := range []bool{false, true} {
+		for _, handles := range []int{1, 2} {
+			t.Run(fmt.Sprintf("sharded=%v/handles=%d", sharded, handles), func(t *testing.T) {
+				s := &busyStore{MemoryStore: NewMemoryStore()}
+				o := ArrayOptions{Shape: shape, ChunkShape: []int{7, 9}, DataType: Int32, FillValue: int32(-1)}
+				if sharded {
+					o.ShardShape = []int{14, 18}
+				}
+				arrays := []*Array{mustArray(t, s, "a", o)}
+				if handles == 2 {
+					b, err := OpenArray(ctx, s, "a")
+					if err != nil {
+						t.Fatal(err)
+					}
+					arrays = append(arrays, b)
+				}
+				var wg sync.WaitGroup
+				errs := make(chan error, product(shape))
+				n := 0
+				for y := 0; y < shape[0]; y += tile[0] {
+					for x := 0; x < shape[1]; x += tile[1] {
+						a := arrays[n%len(arrays)]
+						n++
+						wg.Add(1)
+						go func() {
+							defer wg.Done()
+							region := []int{min(tile[0], shape[0]-y), min(tile[1], shape[1]-x)}
+							data := make([]int32, product(region))
+							for i := range data {
+								data[i] = int32((y+i/region[1])*shape[1] + x + i%region[1])
+							}
+							errs <- Write(ctx, a, []int{y, x}, region, data)
+						}()
+					}
+				}
+				wg.Wait()
+				close(errs)
+				for err := range errs {
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				got, err := Read[int32](ctx, arrays[0], nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lost := 0
+				for i, v := range got {
+					if v != int32(i) {
+						lost++
+					}
+				}
+				if lost > 0 {
+					t.Errorf("%d of %d elements lost to a write beside them", lost, len(got))
+				}
+			})
+		}
+	}
+}
+
+// A Write waiting for a stored object another is patching gives up when its
+// ctx does, and the lock is not left behind for the next one.
+func TestAWriteWaitingForAStoredObjectStopsWithItsContext(t *testing.T) {
+	s := NewMemoryStore()
+	a := mustArray(t, s, "a", ArrayOptions{Shape: []int{4}, ChunkShape: []int{4}, DataType: Int32})
+	unlock, err := storedLocks.lock(ctx, a.storedKey([]int{0}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	if err := Write(c, a, []int{1}, []int{2}, []int32{5, 6}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a write of a held chunk: %v", err)
+	}
+	unlock()
+	if err := Write(ctx, a, []int{1}, []int{2}, []int32{5, 6}); err != nil {
+		t.Fatal(err)
+	}
+	storedLocks.mu.Lock()
+	left := len(storedLocks.held)
+	storedLocks.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d locks left behind", left)
+	}
+}

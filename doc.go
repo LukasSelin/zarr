@@ -44,10 +44,16 @@
 // must therefore bear being called from several goroutines at once, and each
 // object in flight is held in memory; set Concurrency to 1 for one at a time.
 //
-// An Array may be read from several goroutines at once, and written from
-// several so long as no two write the same chunk - or, in a sharded array,
-// the same shard. SetAttributes may not run beside anything else on the same
-// node.
+// An Array may be read and written from several goroutines at once, through
+// one handle or several, so long as no two write the same elements. Regions
+// that share a chunk - or, in a sharded array, a shard - are safe: a Write
+// reads what it covers only part of, patches it and writes it back, and it
+// does so under a lock of that stored object's own. The lock is in this
+// process and nowhere else: two processes, or two machines, writing regions
+// that share a stored object may lose one of them, so split such work along
+// the stored objects (Array.ChunkShape, or ShardShape if sharded).
+// SetAttributes, Resize and Append may not run beside anything else on the
+// same node.
 //
 // What a store holds is not trusted. Metadata, chunks and shards that are
 // malformed are an error, never a panic, and a store cannot make the package
