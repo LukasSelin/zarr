@@ -8,10 +8,10 @@ FUZZTIME ?= 30s
 # Tracked and new-but-not-yet-committed alike, ignored files left out.
 GOFILES = $(shell git ls-files --cached --others --exclude-standard '*.go')
 
-.PHONY: all check test race lint vuln tidy tidy-check fmt fmt-check fuzz tools clean
+.PHONY: all check test race lint vuln published tidy tidy-check fmt fmt-check fuzz tools clean
 
 ## check: what CI checks, in the order it fails fastest
-check: fmt-check lint test vuln
+check: fmt-check lint test published vuln
 
 ## test: every module's tests, with the race detector and goleak
 test race:
@@ -34,6 +34,13 @@ vuln:
 	    echo "==> govulncheck $$m"; \
 	    (cd $$m && go run golang.org/x/vuln/cmd/govulncheck@latest ./...) || exit 1; \
 	done
+
+## published: build and test s3 and zstd against the core their go.mod
+## requires, with the replace dropped, as a consumer gets them. It fails if a
+## sub-module requires a core that was never tagged, or uses what the tag it
+## requires does not have: tag the core first, then require the tag.
+published:
+	@bash scripts/published.sh
 
 ## tidy: go mod tidy every module
 tidy:
