@@ -66,6 +66,27 @@ jobs:
             exit 1
           }
 
+  # Go ignores a replace directive in a dependency, so s3 and zstd are built
+  # and tested here as a consumer gets them: without the replace, against the
+  # tag of the core their go.mod requires. A require of a core that was never
+  # tagged, or of a tag without what the sub-module uses, fails here rather
+  # than in the build of whoever imports it.
+  published:
+    name: ${{ matrix.module }} builds against the core it requires
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ["s3", "zstd"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: "**/go.sum"
+      - name: build and test without the replace
+        run: scripts/published.sh ${{ matrix.module }}
+
   lint:
     name: golangci-lint ${{ matrix.module }}
     runs-on: ubuntu-latest

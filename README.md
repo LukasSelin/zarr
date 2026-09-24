@@ -288,6 +288,21 @@ Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 | `make vuln` | govulncheck, against the modules and the standard library |
 | `make fuzz` | each fuzz target for `FUZZTIME`, 30s by default |
 | `make tidy` | `go mod tidy` in each module |
+| `make published` | `s3` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
+
+`s3` and `zstd` keep a `replace` of the core with the directory above them,
+so that their tests run against the core beside them. Go ignores a
+`replace` in a dependency, so what a consumer gets is the core their
+`require` names; `make published`, and the CI job of the same purpose,
+fail if that is not a tag, or is a tag without what the sub-module uses.
+
+## Releasing
+
+The core is tagged `vX.Y.Z` and each sub-module `s3/vX.Y.Z` or
+`zstd/vX.Y.Z`. Tag the core first; then raise the sub-modules' `require` of
+the core to that tag, if they need it, and commit; then tag the
+sub-modules on that commit. `make published` passes only once the core tag
+they require exists.
 
 Every package's `TestMain` verifies with
 [goleak](https://github.com/uber-go/goleak) that no test left a goroutine
