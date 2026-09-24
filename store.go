@@ -115,6 +115,10 @@ var (
 	// ErrUnsupported is what opening metadata this package cannot honour
 	// wraps: an unknown codec, data type or extension it must understand.
 	ErrUnsupported = errors.New("zarr: unsupported")
+	// ErrZarrV2 is what opening a node written in Zarr version 2 wraps: one
+	// with a .zarray, .zgroup or .zattrs where its zarr.json would be. It
+	// wraps ErrUnsupported, as this package reads version 3 alone.
+	ErrZarrV2 = fmt.Errorf("%w: Zarr version 2", ErrUnsupported)
 )
 
 // ValidKey refuses keys that could reach outside a store: empty ones, ones

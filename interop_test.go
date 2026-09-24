@@ -2,6 +2,7 @@ package zarr
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"os/exec"
@@ -222,6 +223,12 @@ func TestZarrPython(t *testing.T) {
 		var seed uint64
 		if _, err := root.Attribute("seed", &seed); err != nil || seed != math.MaxUint64 {
 			t.Errorf("seed %d: %v", seed, err)
+		}
+		if _, err := OpenGroup(ctx, s, "v2"); !errors.Is(err, ErrZarrV2) {
+			t.Errorf("a version 2 group: %v, not ErrZarrV2", err)
+		}
+		if _, err := OpenArray(ctx, s, "v2/a"); !errors.Is(err, ErrZarrV2) {
+			t.Errorf("a version 2 array: %v, not ErrZarrV2", err)
 		}
 		for _, c := range cases {
 			dispatch(t, c, func() { checkInterop[bool](t, s, c) }, func() { checkInterop[int8](t, s, c) },

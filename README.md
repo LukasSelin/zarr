@@ -40,6 +40,7 @@ row, err := zarr.Read[float32](ctx, h, []int{100, 0}, []int{1, 1024})
 | `sharding_indexed` codec, index at either end | yes: `ArrayOptions.ShardShape`, or a `ShardingCodec` of your own |
 | Extensions with `must_understand: false` | ignored, as the specification allows |
 | Storage transformers | refused |
+| Zarr version 2 (`.zarray`, `.zgroup`) | refused with `ErrZarrV2`, which says so, rather than as not found |
 
 Chunks that hold nothing but the fill value are deleted rather than
 written, as zarr-python does; set `Array.WriteEmptyChunks` to keep them.
@@ -255,7 +256,8 @@ zarr-python every case this package writes: every data type, both endians,
 gzip, crc32c and `numcodecs.shuffle` alone and together, NaN and infinite
 fills, both separators, a scalar, a nested group, dimension names, a
 `uint64` attribute, and shards with the index at the end, at the start, and
-with a codec after the shard. It is skipped unless `ZARR_PYTHON` names a Python with `zarr`
+with a codec after the shard. It also has zarr-python write a Zarr version 2
+group and array, which must be refused with `ErrZarrV2`. It is skipped unless `ZARR_PYTHON` names a Python with `zarr`
 and `numpy`:
 
 ```sh

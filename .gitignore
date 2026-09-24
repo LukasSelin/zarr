@@ -5,3 +5,5 @@ __pycache__/
 *.zarr/
 go.work
 go.work.sum
+# ...but for the Zarr version 2 store the tests read.
+!testdata/v2/store.zarr/

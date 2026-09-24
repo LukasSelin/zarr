@@ -23,6 +23,9 @@
 // github.com/LukasSelin/zarr/zstd. Not yet here: transpose, float16,
 // complex and raw data types, storage transformers.
 //
+// Zarr version 2 is not read: opening a node that has a .zarray, .zgroup or
+// .zattrs and no zarr.json is an error wrapping ErrZarrV2.
+//
 // Arrays are read and written with the generic functions Read, Write,
 // ReadChunk and WriteChunk, whose element type must be the array's data
 // type. Elements are in C order: the last dimension varies fastest.
