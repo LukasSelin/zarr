@@ -83,12 +83,21 @@ window across a corner costs four.
 
 | layout | tile = chunk or larger | tile = half a chunk |
 |---|---:|---:|
-| chunks of 512 | 11.0 Mcells/s (512 tiles) | 3.2 Mcells/s (256 tiles) |
-| shards of 1024, chunks of 256 | 3.3 Mcells/s (512 tiles) | 0.9 Mcells/s (256 tiles) |
+| chunks of 512 | 10.0 Mcells/s (512 tiles) | 3.0 Mcells/s (256 tiles) |
+| shards of 1024, chunks of 256 | 9.3 Mcells/s (512 tiles) | 7.7 Mcells/s (256 tiles) |
 
-A tile smaller than its stored object reads that object, decodes it, patches
-it, re-encodes all of it and writes it back. In a shard that is every chunk
-of the shard, each time.
+A tile smaller than its chunk reads that chunk, decodes it, patches it,
+re-encodes all of it and writes it back. A tile smaller than its shard
+decodes and re-encodes only the chunks of the shard it covers, and writes
+the rest back as they were stored: before that, it decoded and re-encoded
+every chunk of the shard, and the shards ran at 2.8 and 0.81 Mcells/s. A
+tile of 256 is a whole chunk there, so it decodes nothing, and `WriteChunk`
+into a shard costs one chunk's encode: 1.4 ms against 19 ms. Where the
+shard has bytes codecs after the sharding codec, such as gzip over the
+whole shard, the chunks' bytes are not there to keep, and a tile still
+decodes and re-encodes all of the shard.
+
+These figures are from a later run than the rest, on the same machine.
 
 ## Metadata
 
@@ -123,12 +132,11 @@ object store.
    arrays gets every `zarr.json` twice (2N+1 gets), once in `Children` and
    once in `OpenArray`. Opening the child from the bytes `Children` already
    read halves the round trips.
-3. **Align tile writes with the stored objects.** Writing tiles of half a
-   chunk is 3.4 times slower than writing whole chunks, and 12 times slower
-   into shards. The engine writing into Zarr should hand over whole chunks,
-   or whole shards when the array is sharded. In the library, a shard patched
-   by chunk could keep the encoded bytes of the chunks it does not touch
-   rather than decode and re-encode all of them.
+3. **Align tile writes with the chunks.** Writing tiles of half a chunk is
+   3.4 times slower than writing whole chunks. The engine writing into Zarr
+   should hand over whole chunks. Into shards it need not hand over whole
+   shards: a shard patched by chunk keeps the encoded bytes of the chunks it
+   does not touch, which made tiles into shards 3.3 and 9.5 times faster.
 4. **Prefer shuffle for float rasters.** shuffle + gzip 5 reads 2.8 times
    faster than gzip 5 and stores 1.8 times smaller, against 1.16. gzip 1
    writes 3.7 times faster than gzip 5, with the same ratio. gzip 5 and 9
