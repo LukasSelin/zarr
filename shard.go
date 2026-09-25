@@ -234,8 +234,7 @@ func (c *ShardingCodec) EncodeArray(chunk any, spec ChunkSpec) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	index := slices.Repeat([]uint64{noChunk}, 2*product(perShard))
-	var body []byte
+	chunks := make([][]byte, product(perShard))
 	k := 0
 	err = eachIndex(make([]int, len(perShard)), minusOne(perShard), func(local []int) error {
 		defer func() { k++ }()
@@ -243,32 +242,96 @@ func (c *ShardingCodec) EncodeArray(chunk any, spec ChunkSpec) ([]byte, error) {
 		if !spec.WriteEmptyChunks && sub.allFill(spec.Fill) {
 			return nil
 		}
-		b, err := c.inner.encode(sub.slice(), c.innerSpec(spec))
-		if err != nil {
-			return err
-		}
-		index[2*k], index[2*k+1] = uint64(len(body)), uint64(len(b))
-		body = append(body, b...)
-		return nil
+		b, err := c.encodeChunk(sub.slice(), spec)
+		chunks[k] = b
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	if c.location() == IndexEnd {
-		ix, err := c.encodeIndex(perShard, index)
-		return append(body, ix...), err
+	return c.assemble(perShard, chunks)
+}
+
+// encodeChunk is a chunk of a shard of spec, encoded. It is never nil, which
+// in the chunks of a shard is a chunk that is not there.
+func (c *ShardingCodec) encodeChunk(chunk any, spec ChunkSpec) ([]byte, error) {
+	b, err := c.inner.encode(chunk, c.innerSpec(spec))
+	if b == nil && err == nil {
+		b = []byte{}
 	}
+	return b, err
+}
+
+// assemble is a shard of the chunks given, each encoded, nil where the shard
+// does not hold it: laid end to end in C order, the index before or after
+// them.
+func (c *ShardingCodec) assemble(perShard []int, chunks [][]byte) ([]byte, error) {
 	size, err := c.indexSize(perShard)
 	if err != nil {
 		return nil, err
 	}
-	for i := 0; i < len(index); i += 2 {
-		if index[i] != noChunk {
-			index[i] += uint64(size)
+	start := 0
+	if c.location() == IndexStart {
+		start = size
+	}
+	index := slices.Repeat([]uint64{noChunk}, 2*len(chunks))
+	n := start
+	for k, b := range chunks {
+		if b != nil {
+			index[2*k], index[2*k+1] = uint64(n), uint64(len(b))
+			n += len(b)
 		}
 	}
 	ix, err := c.encodeIndex(perShard, index)
-	return append(ix, body...), err
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, n+len(ix))
+	if c.location() == IndexStart {
+		out = append(out, ix...)
+	}
+	for _, b := range chunks {
+		out = append(out, b...)
+	}
+	if c.location() == IndexEnd {
+		out = append(out, ix...)
+	}
+	return out, nil
+}
+
+// split is the encoded chunks of a whole shard holding perShard of them, in C
+// order, each a part of data and nil where the shard does not hold it.
+func (c *ShardingCodec) split(perShard []int, data []byte) ([][]byte, error) {
+	size, err := c.indexSize(perShard)
+	if err != nil {
+		return nil, err
+	}
+	ib, err := c.indexOf(data, size)
+	if err != nil {
+		return nil, err
+	}
+	index, err := c.decodeIndex(perShard, ib)
+	if err != nil {
+		return nil, err
+	}
+	lo, hi := uint64(0), uint64(len(data)-size)
+	if c.location() == IndexStart {
+		lo, hi = uint64(size), uint64(len(data))
+	}
+	if err := checkIndex(index, lo, hi); err != nil {
+		return nil, err
+	}
+	chunks := make([][]byte, len(index)/2)
+	for k := range chunks {
+		b, ok, err := entry(index, k, data)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			chunks[k] = b[:len(b):len(b)]
+		}
+	}
+	return chunks, nil
 }
 
 // indexOf is the bytes of a whole shard that are its index.

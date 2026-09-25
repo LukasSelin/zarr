@@ -32,7 +32,8 @@ type Array struct {
 	indexSize int
 	// WriteEmptyChunks keeps a chunk that holds nothing but the fill value.
 	// By default such a chunk is not stored; it reads as the fill value
-	// either way.
+	// either way. It applies to the chunks a write covers: the chunks of a
+	// shard it does not are left as they are stored, or not.
 	WriteEmptyChunks bool
 	// Concurrency is how many stored objects - chunks, or shards - Read,
 	// Write, Resize and Append work on at once, and how many chunks of a
@@ -330,7 +331,9 @@ func ReadChunk[T Element](ctx context.Context, a *Array, idx []int) ([]T, error)
 // WriteChunk writes the whole chunk at idx: data is chunk shape long. The
 // part of it past the end of the array is kept as the fill value, whatever
 // data holds there, so that growing the array later reads fill. In a sharded
-// array the rest of the chunk's shard is read and written back.
+// array the rest of the chunk's shard is read and written back: as it is
+// stored, if nothing but the sharding codec is between the shard and its
+// bytes, and decoded and encoded again otherwise.
 func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) error {
 	if err := checkType[T](a); err != nil {
 		return err
@@ -346,6 +349,9 @@ func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) e
 	}
 	sidx := a.shardOf(idx)
 	return a.exclusive(ctx, sidx, func() error {
+		if a.patchesChunks() {
+			return patchShard(ctx, a, sidx, idx, idx, false, func([]int, func() ([]T, error)) ([]T, error) { return data, nil })
+		}
 		buf, err := readStored[T](ctx, a, sidx)
 		if err != nil {
 			return err
@@ -411,6 +417,79 @@ func writeStored[T Element](ctx context.Context, a *Array, sidx []int, data []T,
 	}
 	b, err := a.codecs.encode(data, a.storedSpec())
 	if err != nil {
+		return fmt.Errorf("zarr: %s: %w", key, err)
+	}
+	return a.store.Set(ctx, key, b)
+}
+
+// patchesChunks says whether a shard written in part keeps the encoded bytes
+// of the chunks it does not touch: whether nothing but the sharding codec is
+// between a shard and its bytes, so that each chunk's bytes are there to
+// keep.
+func (a *Array) patchesChunks() bool {
+	return a.shard != nil && len(a.codecs.bytes) == 0
+}
+
+// patchShard writes the chunks from lo to hi inclusive, which are all in the
+// shard at sidx, and keeps the encoded bytes of the rest of the shard as they
+// are stored. patch makes each chunk from its index in the array and what
+// reads the chunk as it was, which it need not call; what it returns is the
+// patch's own if owned. A chunk is written as writeStored writes a stored
+// object: fill past the end of the array, and left out of the shard if it is
+// nothing but fill; and the shard is deleted if it holds no chunk at all.
+func patchShard[T Element](ctx context.Context, a *Array, sidx, lo, hi []int, owned bool, patch func(idx []int, old func() ([]T, error)) ([]T, error)) error {
+	key, n := a.storedKey(sidx), product(a.chunks)
+	chunks := make([][]byte, product(a.perShard))
+	b, err := a.store.Get(ctx, key)
+	switch {
+	case errors.Is(err, ErrNotFound):
+	case err != nil:
+		return err
+	default:
+		if chunks, err = a.shard.split(a.perShard, b); err != nil {
+			return fmt.Errorf("zarr: %s: %w", key, err)
+		}
+	}
+	spec := a.storedSpec()
+	inner := a.shard.innerSpec(spec)
+	first := times(sidx, a.perShard)
+	err = eachIndex(lo, hi, func(idx []int) error {
+		local := minus(idx, first)
+		k := 0
+		for d := range local {
+			k = k*a.perShard[d] + local[d]
+		}
+		old := func() ([]T, error) {
+			if chunks[k] == nil {
+				return filled(n, a.fill.(T)), nil
+			}
+			v, err := a.shard.inner.decode(chunks[k], inner)
+			if err != nil {
+				return nil, fmt.Errorf("zarr: %s chunk %v: %w", key, local, err)
+			}
+			return asChunk[T](v, n, key)
+		}
+		buf, err := patch(idx, old)
+		if err != nil {
+			return err
+		}
+		buf = fillPast(a, times(idx, a.chunks), a.chunks, buf, owned)
+		if !a.WriteEmptyChunks && allFill(buf, a.fill.(T)) {
+			chunks[k] = nil
+			return nil
+		}
+		if chunks[k], err = a.shard.encodeChunk(buf, spec); err != nil {
+			return fmt.Errorf("zarr: %s chunk %v: %w", key, local, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(chunks, func(b []byte) bool { return b != nil }) {
+		return a.store.Delete(ctx, key)
+	}
+	if b, err = a.shard.assemble(a.perShard, chunks); err != nil {
 		return fmt.Errorf("zarr: %s: %w", key, err)
 	}
 	return a.store.Set(ctx, key, b)
@@ -706,8 +785,10 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 
 // Write writes data over the region of the array beginning at start and of
 // shape, in C order. A nil start is the origin, and a nil shape the rest of
-// the array. A chunk - or a shard, in a sharded array - the region covers
-// only part of is read and written back. A Write that fails part way has
+// the array. A chunk the region covers only part of is read and written
+// back. So is a shard, but where nothing but the sharding codec is between
+// it and its bytes only the chunks of it the region covers are decoded and
+// encoded again: the rest are written back as they were stored. A Write that fails part way has
 // written some of the stored objects the region covers and not others, in no
 // particular order.
 //
@@ -737,6 +818,24 @@ func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []
 	return eachSpan(ctx, a.limit(spanLen(lo, hi)), lo, hi, func(ctx context.Context, _ int, sidx []int) error {
 		return a.exclusive(ctx, sidx, func() error {
 			at, n, whole := a.overlap(sidx, start, shape, a.grid)
+			if !whole && a.patchesChunks() {
+				lo, hi := make([]int, len(at)), make([]int, len(at))
+				for k := range at {
+					lo[k], hi[k] = at[k]/a.chunks[k], (at[k]+n[k]-1)/a.chunks[k]
+				}
+				return patchShard(ctx, a, sidx, lo, hi, true, func(idx []int, old func() ([]T, error)) ([]T, error) {
+					at, n, whole := a.overlap(idx, start, shape, a.chunks)
+					buf := filled(product(a.chunks), a.fill.(T))
+					if !whole {
+						var err error
+						if buf, err = old(); err != nil {
+							return nil, err
+						}
+					}
+					copyBlock(buf, a.chunks, minus(at, times(idx, a.chunks)), data, shape, minus(at, start), n)
+					return buf, nil
+				})
+			}
 			var buf []T
 			var err error
 			if whole {
