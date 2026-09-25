@@ -30,6 +30,10 @@ func dem() []float32 {
 	return f
 }
 
+// pipelines has no shuffle before zstd, and BenchmarkRaster no sweep of
+// Array.Concurrency: the core this module requires (v0.3.0) has neither, and
+// scripts/published.sh builds it against that. Add them once a core with
+// them is tagged and required.
 func pipelines() []struct {
 	name   string
 	codecs []zarr.Codec
@@ -40,58 +44,53 @@ func pipelines() []struct {
 	}{
 		{"zstd1", []zarr.Codec{zarr.BytesCodec{Endian: zarr.Little}, Codec{Level: 1}}},
 		{"zstd3", []zarr.Codec{zarr.BytesCodec{Endian: zarr.Little}, Codec{Level: 3}}},
-		{"shuffle+zstd3", []zarr.Codec{zarr.BytesCodec{Endian: zarr.Little}, zarr.ShuffleCodec{ElementSize: 4}, Codec{Level: 3}}},
 	}
 }
 
 func BenchmarkRaster(b *testing.B) {
 	data := dem()
 	for _, p := range pipelines() {
-		for _, conc := range []int{1, 0} {
-			o := zarr.ArrayOptions{Shape: []int{side, side}, ChunkShape: []int{512, 512}, DataType: zarr.Float32, Codecs: p.codecs}
-			b.Run(fmt.Sprintf("codec=%s/conc=%d/write", p.name, conc), func(b *testing.B) {
-				a, err := zarr.CreateArray(ctx, zarr.NewMemoryStore(), "r", o)
-				if err != nil {
-					b.Fatal(err)
-				}
-				a.Concurrency = conc
-				b.SetBytes(4 * side * side)
-				b.ReportAllocs()
-				for range b.N {
-					if err := zarr.Write(ctx, a, nil, nil, data); err != nil {
-						b.Fatal(err)
-					}
-				}
-			})
-			b.Run(fmt.Sprintf("codec=%s/conc=%d/read", p.name, conc), func(b *testing.B) {
-				s := zarr.NewMemoryStore()
-				a, err := zarr.CreateArray(ctx, s, "r", o)
-				if err != nil {
-					b.Fatal(err)
-				}
+		o := zarr.ArrayOptions{Shape: []int{side, side}, ChunkShape: []int{512, 512}, DataType: zarr.Float32, Codecs: p.codecs}
+		b.Run(fmt.Sprintf("codec=%s/write", p.name), func(b *testing.B) {
+			a, err := zarr.CreateArray(ctx, zarr.NewMemoryStore(), "r", o)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.SetBytes(4 * side * side)
+			b.ReportAllocs()
+			for range b.N {
 				if err := zarr.Write(ctx, a, nil, nil, data); err != nil {
 					b.Fatal(err)
 				}
-				a.Concurrency = conc
-				var stored int
-				if err := s.List(ctx, "r/c", func(k string) error {
-					v, err := s.Get(ctx, k)
-					stored += len(v)
-					return err
-				}); err != nil {
+			}
+		})
+		b.Run(fmt.Sprintf("codec=%s/read", p.name), func(b *testing.B) {
+			s := zarr.NewMemoryStore()
+			a, err := zarr.CreateArray(ctx, s, "r", o)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := zarr.Write(ctx, a, nil, nil, data); err != nil {
+				b.Fatal(err)
+			}
+			var stored int
+			if err := s.List(ctx, "r/c", func(k string) error {
+				v, err := s.Get(ctx, k)
+				stored += len(v)
+				return err
+			}); err != nil {
+				b.Fatal(err)
+			}
+			b.SetBytes(4 * side * side)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if _, err := zarr.Read[float32](ctx, a, nil, nil); err != nil {
 					b.Fatal(err)
 				}
-				b.SetBytes(4 * side * side)
-				b.ReportAllocs()
-				b.ResetTimer()
-				for range b.N {
-					if _, err := zarr.Read[float32](ctx, a, nil, nil); err != nil {
-						b.Fatal(err)
-					}
-				}
-				b.ReportMetric(float64(4*side*side)/float64(stored), "ratio")
-			})
-		}
+			}
+			b.ReportMetric(float64(4*side*side)/float64(stored), "ratio")
+		})
 	}
 }
 
