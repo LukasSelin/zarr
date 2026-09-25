@@ -103,20 +103,26 @@ of the shard, each time.
 
 | operation | memory | dir | round trips |
 |---|---:|---:|---:|
-| `OpenArray`, no attributes | 26 µs | 32 µs | 1 get |
-| `OpenArray`, 50 attributes | 160 µs | 170 µs | 1 get |
-| `OpenArray`, sharded, no attributes | 55 µs | 63 µs | 1 get |
-| `OpenGroup`, no attributes / 50 | 2.9 / 130 µs | 7.4 / 140 µs | 1 get |
+| `OpenArray`, no attributes | 7.7 µs | 15 µs | 1 get |
+| `OpenArray`, 50 attributes | 27 µs | 34 µs | 1 get |
+| `OpenArray`, sharded, no attributes | 16 µs | 23 µs | 1 get |
+| `OpenGroup`, no attributes / 50 | 0.6 / 20 µs | 6.5 / 27 µs | 1 get |
 | `CreateArray`, no attributes | 18 µs | 0.2 ms | 1 get, 1 set |
 | `SetAttributes`, on 50 | 64 µs | 140 µs | 1 set |
 | `Attribute("crs_wkt")` | 3.4 µs | | none |
 | open something that is not there | 1.4 µs | | 4 gets |
 | `Children`, 10 / 100 / 1000 | 0.1 / 0.9 / 10 ms | 0.2 / 1.6 / 16 ms | 1 list + 1 get each |
-| a group and its 10 / 100 arrays opened | 0.6 / 5.0 ms | 0.7 / 6.6 ms | 21 / 201 gets |
+| a group and its 10 / 100 arrays opened | 0.2 / 2.3 ms | 0.4 / 3.5 ms | 21 / 201 gets |
 
-`readMetadata` unmarshals each `zarr.json` three times: into a map of fields,
-into its version and node type, and into the metadata itself. That is why
-attributes cost so much.
+`readMetadata` used to unmarshal each `zarr.json` three times: into a map of
+fields, into its version and node type, and into the metadata itself. It
+now reads it in one pass, splitting the attributes without decoding them,
+and the codecs and chunk grid are read the same way. The rows for opening
+were measured again after that, on a VM of the same kind at 2.80 GHz, where
+before they were 34, 181, 64, 3.9 / 154 µs and 0.6 / 5.8 ms: 3 to 7 times
+less. Writing is as it was: `json.MarshalIndent` compacts each attribute and
+indents the whole again, and writing the same bytes any other way means
+doing both of those by hand.
 
 ## What to make faster
 
@@ -159,9 +165,8 @@ object store.
    costs four. An LRU of decoded chunks in the adapter, like the block cache
    of strata's `cog`, would cut that to one decode per chunk. Chunks of 256
    make small windows 4 times cheaper and cost nothing on whole reads.
-8. **Parse `zarr.json` once.** Unmarshalling it once rather than three
-   times would make `OpenArray` about 3 times cheaper. That matters only
-   when opening hundreds of arrays, after items 1 and 2.
+8. ~~**Parse `zarr.json` once.**~~ Done: `OpenArray` is 3 to 7 times
+   cheaper, the most with many attributes.
 
 Smaller things:
 
