@@ -28,8 +28,8 @@ compresses much without shuffle, which is typical of real float rasters.
 
 | codec | read, 1 core | read, 4 | write, 1 core | write, 4 | ratio |
 |---|---:|---:|---:|---:|---:|
-| none | 1041 MB/s | 2717 MB/s | 990 MB/s | 2508 MB/s | 1.00 |
-| crc32c | 971 | 2802 | 748 | 1750 | 1.00 |
+| none | 2074 MB/s | 4008 MB/s | 2368 MB/s | 3813 MB/s | 1.00 |
+| crc32c | 1885 | 3161 | 1581 | 2755 | 1.00 |
 | gzip 1 | 108 | 360 | 156 | 415 | 1.16 |
 | gzip 5 | 105 | 361 | 42 | 164 | 1.16 |
 | gzip 9 | 109 | 379 | 44 | 156 | 1.16 |
@@ -37,6 +37,12 @@ compresses much without shuffle, which is typical of real float rasters.
 | **shuffle + gzip 5** | **293** | **986** | 58 | 211 | **1.80** |
 | zstd 1 (`zstd` module) | – | 1871 | – | 1624 | 1.00 |
 | zstd 3 (`zstd` module) | – | 2062 | – | 1996 | 1.00 |
+
+The rows `none` and `crc32c` are from after the bytes codec copied rather
+than decoded element by element (item 5 below), the median of 5 runs. The
+same runs measured the old code at 813 and 797 MB/s for a read on one core,
+lower than the 1041 and 971 above, so the VM was about a fifth slower that
+day and the gain is larger than the rows show against each other.
 
 zstd did not compress this raster at all (a ratio of 1.00). It skips blocks
 it finds incompressible, so its speed here is close to that of `none` and
@@ -56,8 +62,8 @@ The profile of an uncompressed read, one core:
 
 | | |
 |---|---:|
-| `encoding/binary.decodeFast` (the bytes codec, element by element) | 55% |
-| `memmove` + `memclr` (copies: store → decode → `out`) | 30% |
+| `memmove` + `memclr` (copies: store → decode → `out`, and new buffers cleared) | 90% |
+| of which the bytes codec (`BytesCodec.DecodeArray`: allocate, clear, copy) | 28% |
 
 A gzip 5 read spends 62% of its time in `compress/flate`, and the bytes
 codec and the copies take about 15% more.
@@ -134,13 +140,15 @@ object store.
    writes 3.7 times faster than gzip 5, with the same ratio. gzip 5 and 9
    buy nothing on float data. This is a choice of default and needs no
    code.
-5. **Decode the bytes codec with a copy.** Element-by-element decoding is
-   55% of an uncompressed read and caps it at about 1 GB/s per core. On a
-   little-endian machine, bytes in little-endian order can be copied
-   straight into the element slice.
-6. **Copy less on a read.** The store's copy, the decoded chunk and the copy
-   into `out` are 30% of an uncompressed read and 4 times the raster in
-   allocations. A chunk that covers its part of `out` exactly could be
+5. **Decode the bytes codec with a copy.** Done: bytes in the machine's
+   order are copied straight into or out of the element slice, and bytes
+   in the other order are reversed a word at a time. Element-by-element
+   decoding was 55% of an uncompressed read and capped it at about 1 GB/s
+   per core; the bytes codec now runs at about 3 GB/s in the machine's
+   order and 2.3 GB/s in the other, and an uncompressed read at 2 GB/s.
+6. **Copy less on a read.** With item 5 done, the store's copy, the
+   decoded chunk and the copy into `out` are 90% of an uncompressed read
+   and 4 times the raster in allocations. A chunk that covers its part of `out` exactly could be
    decoded straight into it.
 7. **Cache decoded chunks for windowed reads.** A pixel costs a whole
    chunk (9 ms at 512, gzip), and a focal window across a chunk corner
@@ -155,7 +163,10 @@ Smaller things:
 
 - A chunk that was never written is filled and then copied. It could be
   filled straight into `out`; sparse reads run at 2 GB/s.
-- `CRC32CCodec.EncodeBytes` copies the whole chunk to append 4 bytes.
+- `CRC32CCodec.EncodeBytes` copies the whole chunk to append 4 bytes. It
+  now copies it once, into a buffer with room for the checksum: 1 MB
+  allocated for a 1 MB chunk rather than 2.3 MB. It cannot append in place,
+  as the bytes it is given may be the caller's.
 - Opening something that is not there costs 4 gets, because it looks for
   version 2 metadata too. An adapter that checks whether an array exists
   pays all 4 over the network.
