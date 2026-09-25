@@ -111,8 +111,20 @@ of the shard, each time.
 | `SetAttributes`, on 50 | 64 µs | 140 µs | 1 set |
 | `Attribute("crs_wkt")` | 3.4 µs | | none |
 | open something that is not there | 1.4 µs | | 4 gets |
-| `Children`, 10 / 100 / 1000 | 0.1 / 0.9 / 10 ms | 0.2 / 1.6 / 16 ms | 1 list + 1 get each |
-| a group and its 10 / 100 arrays opened | 0.2 / 2.3 ms | 0.4 / 3.5 ms | 21 / 201 gets |
+| `Children`, 10 / 100 / 1000 | 0.1 / 0.5 / 4.7 ms | 0.1 / 0.8 / 7.6 ms | 1 list + 1 get each |
+| a group and its 10 / 100 arrays opened, by `OpenArray` | 0.2 / 1.8 ms | 0.5 / 2.9 ms | 21 / 201 gets |
+| a group and its 10 / 100 arrays opened, by `OpenArrays` | 0.2 / 1.0 ms | 0.3 / 1.3 ms | 11 / 101 gets |
+
+`Children` reads, and parses the node type of, up to 16 children at once,
+and `OpenArrays` opens the arrays of a group from what it read. From a
+store whose every get waits (`latentStore`, which asks for 0.2 ms and
+sleeps about 1.2 ms on this VM):
+
+| operation | one at a time | 16 at once |
+|---|---:|---:|
+| `Children`, 10 / 100 / 1000 | 12 / 117 / 1170 ms | 1.3 / 7.0 / 67 ms |
+| a group's 10 / 100 arrays, by `Children` and `OpenArray` | 24 / 241 ms | 13 / 125 ms |
+| a group's 10 / 100 arrays, by `OpenArrays` | | 1.5 / 7.5 ms |
 
 `readMetadata` used to unmarshal each `zarr.json` three times: into a map of
 fields, into its version and node type, and into the metadata itself. It

@@ -172,6 +172,11 @@ func readMetadata(ctx context.Context, s Store, path, node string, known map[str
 	if err != nil {
 		return err
 	}
+	return parseMetadata(b, path, node, known, v)
+}
+
+// parseMetadata is readMetadata of the metadata b, already read from path.
+func parseMetadata(b []byte, path, node string, known map[string]bool, v any) error {
 	if decodeMetadata(b, node, known, v) {
 		return nil
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -97,8 +98,68 @@ type Child struct {
 // one level under the group and reads the metadata of each name it finds, so
 // it costs a listing and a read for each child rather than a walk of every
 // key under the group; a name with no metadata under it - the chunks of an
-// array, or a directory a delete left empty - is not a child.
+// array, or a directory a delete left empty - is not a child. The reads go
+// as many at once as the chunks of an array that says nothing about its
+// concurrency, so that over a network a thousand children take the time of
+// some sixty round trips rather than of a thousand.
 func (g *Group) Children(ctx context.Context) ([]Child, error) {
+	found, err := g.children(ctx)
+	if err != nil || len(found) == 0 {
+		return nil, err
+	}
+	children := make([]Child, len(found))
+	for i, c := range found {
+		children[i] = c.Child
+	}
+	return children, nil
+}
+
+// OpenArrays opens every array directly in the group, sorted by name, from
+// the metadata Children reads: a listing and a read for each child, rather
+// than the read again that OpenArray of each child would make. Groups, and
+// children whose metadata this package cannot read, are left out; an array
+// that does not open is an error, as it is from OpenArray.
+func (g *Group) OpenArrays(ctx context.Context) ([]*Array, error) {
+	found, err := g.children(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var named []child
+	for _, c := range found {
+		if c.Type == "array" {
+			named = append(named, c)
+		}
+	}
+	if len(named) == 0 {
+		return nil, nil
+	}
+	// Parsing is most of what is left, so it goes as many at once too.
+	arrays := make([]*Array, len(named))
+	err = eachSpan(ctx, min(defaultConcurrency, len(named)), []int{0}, []int{len(named) - 1},
+		func(_ context.Context, n int, _ []int) error {
+			path := join(g.path, named[n].Name)
+			var m ArrayMetadata
+			if err := parseMetadata(named[n].meta, path, "array", arrayKeys, &m); err != nil {
+				return err
+			}
+			a, err := newArray(g.store, path, m)
+			arrays[n] = a
+			return err
+		})
+	if err != nil {
+		return nil, err
+	}
+	return arrays, nil
+}
+
+// child is a Child and the metadata it was found by.
+type child struct {
+	Child
+	meta []byte
+}
+
+// children is Children, with the metadata of each child.
+func (g *Group) children(ctx context.Context) ([]child, error) {
 	prefix := g.path
 	if prefix != "" {
 		prefix += "/"
@@ -119,22 +180,32 @@ func (g *Group) Children(ctx context.Context) ([]Child, error) {
 		return nil, err
 	}
 	sort.Strings(names) // a store lists in no particular order
-	var children []Child
-	for _, name := range names {
-		b, err := g.store.Get(ctx, metadataKey(join(g.path, name)))
-		if errors.Is(err, ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		var head struct {
-			NodeType string `json:"node_type"`
-		}
-		// Metadata that does not parse has no type, and is a child anyway:
-		// finding it is how it is deleted.
-		_ = json.Unmarshal(b, &head)
-		children = append(children, Child{Name: name, Type: head.NodeType})
+	// Each read goes into the slot of its name, so the order is kept and no
+	// lock is needed; a slot left without metadata is a name with none.
+	found := make([]child, len(names))
+	err = eachSpan(ctx, min(defaultConcurrency, len(names)), []int{0}, []int{len(names) - 1},
+		func(ctx context.Context, n int, _ []int) error {
+			b, err := g.store.Get(ctx, metadataKey(join(g.path, names[n])))
+			if errors.Is(err, ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if b == nil {
+				b = []byte{}
+			}
+			var head struct {
+				NodeType string `json:"node_type"`
+			}
+			// Metadata that does not parse has no type, and is a child
+			// anyway: finding it is how it is deleted.
+			_ = json.Unmarshal(b, &head)
+			found[n] = child{Child{Name: names[n], Type: head.NodeType}, b}
+			return nil
+		})
+	if err != nil {
+		return nil, err
 	}
-	return children, nil
+	return slices.DeleteFunc(found, func(c child) bool { return c.meta == nil }), nil
 }

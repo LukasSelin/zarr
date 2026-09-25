@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // The metadata benchmarks are what opening, creating and walking a
@@ -299,6 +300,86 @@ func BenchmarkMetaOpenCatalog(b *testing.B) {
 			})
 		}
 	})
+}
+
+// BenchmarkMetaOpenCatalogArrays is BenchmarkMetaOpenCatalog by OpenArrays,
+// which opens each array from the metadata Children read: N+1 gets rather
+// than 2N+1.
+func BenchmarkMetaOpenCatalogArrays(b *testing.B) {
+	eachMetaStore(b, func(b *testing.B, store func(b *testing.B) *tallyStore) {
+		for _, n := range []int{10, 100} {
+			b.Run(fmt.Sprintf("arrays=%d", n), func(b *testing.B) {
+				sub := store(b)
+				catalog(b, sub, n)
+				sub.reset()
+				b.ReportAllocs()
+				b.ResetTimer()
+				for range b.N {
+					g, err := OpenGroup(ctx, sub, "scene")
+					if err != nil {
+						b.Fatal(err)
+					}
+					if as, err := g.OpenArrays(ctx); err != nil || len(as) != n {
+						b.Fatal(len(as), err)
+					}
+				}
+				sub.report(b)
+			})
+		}
+	})
+}
+
+// BenchmarkMetaChildrenLatent and BenchmarkMetaOpenCatalogLatent are
+// BenchmarkMetaChildren and the two ways of opening a catalogue from a store
+// whose every get waits, as latentStore does: over a network the round trips
+// and how many of them are in flight are the whole of it.
+func BenchmarkMetaChildrenLatent(b *testing.B) {
+	for _, n := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("children=%d", n), func(b *testing.B) {
+			if n > 100 && testing.Short() {
+				b.Skip("-short")
+			}
+			s := latentStore{MemoryStore: NewMemoryStore(), wait: 200 * time.Microsecond}
+			g := catalog(b, s, n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				cs, err := g.Children(ctx)
+				if err != nil || len(cs) != n {
+					b.Fatal(len(cs), err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkMetaOpenCatalogLatent(b *testing.B) {
+	for _, n := range []int{10, 100} {
+		s := latentStore{MemoryStore: NewMemoryStore(), wait: 200 * time.Microsecond}
+		g := catalog(b, s, n)
+		b.Run(fmt.Sprintf("arrays=%d/by=OpenArray", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				cs, err := g.Children(ctx)
+				if err != nil {
+					b.Fatal(err)
+				}
+				for _, c := range cs {
+					if _, err := g.OpenArray(ctx, c.Name); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("arrays=%d/by=OpenArrays", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				if _, err := g.OpenArrays(ctx); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
 
 // BenchmarkMetaOpenMissing opens what is not there: the three extra gets
