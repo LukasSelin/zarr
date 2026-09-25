@@ -348,21 +348,23 @@ var nativeOrder binary.ByteOrder = func() binary.ByteOrder {
 }()
 
 // swapBytes copies src to dst, which is as long, reversing the bytes of each
-// element of size bytes.
+// element of size bytes. Each element is sliced to its size, length and
+// capacity both, which lets the compiler drop the bounds checks.
 func swapBytes(dst, src []byte, size int) {
 	le, be := binary.LittleEndian, binary.BigEndian
+	dst = dst[:len(src)]
 	switch size {
 	case 2:
 		for i := 0; i+2 <= len(src); i += 2 {
-			le.PutUint16(dst[i:], be.Uint16(src[i:]))
+			le.PutUint16(dst[i:i+2:i+2], be.Uint16(src[i:i+2:i+2]))
 		}
 	case 4:
 		for i := 0; i+4 <= len(src); i += 4 {
-			le.PutUint32(dst[i:], be.Uint32(src[i:]))
+			le.PutUint32(dst[i:i+4:i+4], be.Uint32(src[i:i+4:i+4]))
 		}
 	case 8:
 		for i := 0; i+8 <= len(src); i += 8 {
-			le.PutUint64(dst[i:], be.Uint64(src[i:]))
+			le.PutUint64(dst[i:i+8:i+8], be.Uint64(src[i:i+8:i+8]))
 		}
 	}
 }
