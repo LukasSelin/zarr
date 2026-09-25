@@ -63,18 +63,27 @@ A gzip 5 read spends 62% of its time in `compress/flate`, and the bytes
 codec and the copies take about 15% more.
 
 A whole read allocates about 4 times the raster: 65 MB for a 16 MB float32
-raster.
+raster. Of that, the store's copy, the decoded chunk and `out` itself are 3
+times; the rest is the codecs' own buffers. A shard read whole no longer adds
+a fourth copy of each chunk, which took 84 MB off to 68 MB for a raster in
+shards of 1024; the store's copy and the decoded chunk are left for a codec
+that can decode into `out`.
 
 ### Windows (float32, gzip 5)
 
 | window | chunk 512 | chunk 256 | chunk 512, no codec |
 |---|---:|---:|---:|
-| one pixel | 9.1 ms | 2.3 ms | 0.9 ms |
-| 3×3 across a chunk corner | 12.2 ms | 3.0 ms | 1.5 ms |
-| 256² aligned | 9.2 ms | 2.4 ms | 0.9 ms |
-| 256² across four chunks | 12.6 ms | 3.1 ms | 1.4 ms |
-| a row of 2048 | 11.1 ms | 5.4 ms | 1.5 ms |
-| 1024² aligned | 12.6 ms | 11.9 ms | 2.1 ms |
+| one pixel | 7.2 ms | 1.8 ms | 0.6 ms |
+| 3×3 across a chunk corner | 8.7 ms | 2.2 ms | 0.8 ms |
+| 256² aligned | 7.2 ms | 1.8 ms | 0.7 ms |
+| 256² across four chunks | 8.8 ms | 2.1 ms | 0.9 ms |
+| a row of 2048 | 8.2 ms | 4.1 ms | 0.9 ms |
+| 1024² aligned | 9.3 ms | 8.9 ms | 1.1 ms |
+
+These are from a later run, on a VM of the same kind at 2.30 GHz, of 5 runs
+each. A window that is one whole chunk is that chunk as it was decoded, with
+no copy into a region of its own: a quarter less allocated for 256² aligned
+in chunks of 256.
 
 Every window decodes whole chunks: a pixel costs a whole chunk, and a 3×3
 window across a corner costs four.
@@ -141,7 +150,10 @@ object store.
 6. **Copy less on a read.** The store's copy, the decoded chunk and the copy
    into `out` are 30% of an uncompressed read and 4 times the raster in
    allocations. A chunk that covers its part of `out` exactly could be
-   decoded straight into it.
+   decoded straight into it, which needs codecs that decode into a slice
+   they are given. Done already: a chunk of a shard read whole is copied
+   from the shard straight into `out`, a region that is one chunk is that
+   chunk, and a block of whole rows is copied at once.
 7. **Cache decoded chunks for windowed reads.** A pixel costs a whole
    chunk (9 ms at 512, gzip), and a focal window across a chunk corner
    costs four. An LRU of decoded chunks in the adapter, like the block cache
@@ -153,8 +165,10 @@ object store.
 
 Smaller things:
 
-- A chunk that was never written is filled and then copied. It could be
-  filled straight into `out`; sparse reads run at 2 GB/s.
+- Done: a chunk that was never written is filled straight into `out`, and
+  not at all when the fill is zero. A sparse read of the raster went from
+  5.0 to 1.3 ms (fill 0) and from 5.4 to 1.8 ms (NaN), 13 and 9 GB/s, and
+  allocates the raster once rather than twice.
 - `CRC32CCodec.EncodeBytes` copies the whole chunk to append 4 bytes.
 - Opening something that is not there costs 4 gets, because it looks for
   version 2 metadata too. An adapter that checks whether an array exists
