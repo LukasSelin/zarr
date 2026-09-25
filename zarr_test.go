@@ -224,6 +224,61 @@ func TestOpeningMetadataWrittenElsewhere(t *testing.T) {
 	}
 }
 
+// What this package writes, and plain metadata written elsewhere, decode in
+// one pass rather than the slow way, and the refusals are the slow way's.
+func TestMetadataDecodesInOnePass(t *testing.T) {
+	s := NewMemoryStore()
+	for path, sharded := range map[string]bool{"chunked": false, "sharded": true} {
+		if _, err := CreateArray(ctx, s, path, metaOptions(sharded, 50)); err != nil {
+			t.Fatal(err)
+		}
+		b := must(s.Get(ctx, metadataKey(path)))
+		var m ArrayMetadata
+		if !decodeMetadata(b, "array", arrayKeys, &m) {
+			t.Fatalf("%s:\n%s", path, b)
+		}
+		if sharded {
+			var j shardingJSON
+			if cfg := m.Codecs[0].Configuration; !decodeObject(cfg, shardingKeys, j.field) {
+				t.Fatalf("sharding configuration %s", cfg)
+			}
+		}
+	}
+	if _, err := CreateGroup(ctx, s, "g", metaAttrs(50)); err != nil {
+		t.Fatal(err)
+	}
+	if !decodeMetadata(must(s.Get(ctx, "g/zarr.json")), "group", groupKeys, &GroupMetadata{}) {
+		t.Fatal("group")
+	}
+	elsewhere := `{"zarr_format": 3, "node_type": "array", "shape": [10000, 1000], "dimension_names": ["rows", null],
+  "data_type": "float64", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [1000, 100]}},
+  "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+  "codecs": [{"name": "bytes", "configuration": {"endian": "big"}}, {"name": "gzip", "configuration": {"level": 1}}, "crc32c"],
+  "fill_value": "NaN", "attributes": {"foo": 42}, "future": {"must_understand": false, "anything": 1}}`
+	if !decodeMetadata([]byte(elsewhere), "array", arrayKeys, &ArrayMetadata{}) {
+		t.Fatal("metadata written elsewhere")
+	}
+
+	for _, c := range []struct {
+		meta, want string
+		is         error
+	}{
+		{`{"zarr_format": 2, "node_type": "group"}`, `zarr: unsupported: "m" is zarr_format 2`, ErrUnsupported},
+		{`{"node_type": "group"}`, `zarr: unsupported: "m" is zarr_format 0`, ErrUnsupported},
+		{`{"zarr_format": 3, "node_type": "array"}`, `zarr: "m" is a "array", not an group`, nil},
+		{`{"zarr_format": 3, "node_type": "group", "x": {"must_understand": true}}`, `zarr: unsupported: "m" has field "x"`, ErrUnsupported},
+		{`{"zarr_format": 3, "node_type": "group", "x": 1}`, `zarr: unsupported: "m" has field "x"`, ErrUnsupported},
+		{`{"zarr_format": "3", "node_type": "group"}`, `zarr: metadata of "m": json: cannot unmarshal string into Go struct field .zarr_format of type int`, nil},
+		{`{"zarr_format": 3, "node_type": "group",}`, `zarr: metadata of "m": invalid character '}' looking for beginning of object key string`, nil},
+	} {
+		s.Set(ctx, "m/zarr.json", []byte(c.meta))
+		_, err := OpenGroup(ctx, s, "m")
+		if err == nil || err.Error() != c.want || c.is != nil && !errors.Is(err, c.is) {
+			t.Errorf("%s: %v, not %s", c.meta, err, c.want)
+		}
+	}
+}
+
 func TestFillValues(t *testing.T) {
 	for _, c := range []struct {
 		d    DataType

@@ -151,8 +151,11 @@ func newArray(s Store, path string, m ArrayMetadata) (*Array, error) {
 	var grid struct {
 		ChunkShape []int `json:"chunk_shape"`
 	}
-	if err := json.Unmarshal(m.ChunkGrid.Configuration, &grid); err != nil {
-		return nil, bad("chunk grid: %v", err)
+	if !decodeObject(m.ChunkGrid.Configuration, []string{"chunk_shape"}, func(string) any { return &grid.ChunkShape }) {
+		grid.ChunkShape = nil
+		if err := json.Unmarshal(m.ChunkGrid.Configuration, &grid); err != nil {
+			return nil, bad("chunk grid: %v", err)
+		}
 	}
 	a.grid = grid.ChunkShape
 	if len(a.grid) != len(m.Shape) {
@@ -317,7 +320,11 @@ func ReadChunk[T Element](ctx context.Context, a *Array, idx []int) ([]T, error)
 	if err != nil {
 		return nil, err
 	}
-	return read(ctx, minus(idx, times(sidx, a.perShard)))
+	v, err := read(ctx, minus(idx, times(sidx, a.perShard)))
+	if err != nil {
+		return nil, err
+	}
+	return v.chunk(a), nil
 }
 
 // WriteChunk writes the whole chunk at idx: data is chunk shape long. The
@@ -357,19 +364,30 @@ func (a *Array) storedSpec() ChunkSpec {
 
 // readStored reads and decodes the whole of the stored object at sidx.
 func readStored[T Element](ctx context.Context, a *Array, sidx []int) ([]T, error) {
+	v, ok, err := getStored[T](ctx, a, sidx)
+	if err != nil || ok {
+		return v, err
+	}
+	return filled(product(a.grid), a.fill.(T)), nil
+}
+
+// getStored reads and decodes the whole of the stored object at sidx, and
+// says whether there is one: if not, it is all fill.
+func getStored[T Element](ctx context.Context, a *Array, sidx []int) ([]T, bool, error) {
 	key := a.storedKey(sidx)
 	b, err := a.store.Get(ctx, key)
 	if errors.Is(err, ErrNotFound) {
-		return filled(product(a.grid), a.fill.(T)), nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	v, err := a.codecs.decode(b, a.storedSpec())
 	if err != nil {
-		return nil, fmt.Errorf("zarr: %s: %w", key, err)
+		return nil, false, fmt.Errorf("zarr: %s: %w", key, err)
 	}
-	return asChunk[T](v, product(a.grid), key)
+	v2, err := asChunk[T](v, product(a.grid), key)
+	return v2, err == nil, err
 }
 
 func asChunk[T Element](v any, n int, key string) ([]T, error) {
@@ -398,31 +416,62 @@ func writeStored[T Element](ctx context.Context, a *Array, sidx []int, data []T,
 	return a.store.Set(ctx, key, b)
 }
 
+// chunkView is a chunk as a reader of a stored object hands it over: the
+// block of chunk shape at at in src, an array of shape. A nil src is a chunk
+// never written, all fill. src may be the whole of the stored object, which
+// the view shares with the other chunks in it.
+type chunkView[T Element] struct {
+	src       []T
+	shape, at []int
+}
+
+// chunk is the chunk on its own: src itself if it is no more than the chunk,
+// and a new slice otherwise.
+func (v chunkView[T]) chunk(a *Array) []T {
+	n := product(a.chunks)
+	switch {
+	case v.src == nil:
+		return filled(n, a.fill.(T))
+	case len(v.src) == n:
+		return v.src
+	}
+	out := make([]T, n)
+	copyBlock(out, a.chunks, make([]int, len(a.chunks)), v.src, v.shape, v.at, a.chunks)
+	return out
+}
+
 // openStored is a reader of the chunks of the stored object at sidx, each by
 // its index within that object. An unsharded chunk is read whole when it is
 // asked for. A shard is read whole at once, unless byRange: then its index is
 // read now and each chunk when it is asked for. The reader it returns may be
 // called from several goroutines at once, and outlives the ctx the object was
 // opened with: each call has a ctx of its own.
-func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(ctx context.Context, local []int) ([]T, error), error) {
+func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(ctx context.Context, local []int) (chunkView[T], error), error) {
 	// The reader outlives the loop that is walking the indices, which keeps
 	// one slice of its own for all of them.
 	sidx = slices.Clone(sidx)
+	origin := make([]int, len(sidx))
 	if a.shard == nil {
-		return func(ctx context.Context, _ []int) ([]T, error) { return readStored[T](ctx, a, sidx) }, nil
+		return func(ctx context.Context, _ []int) (chunkView[T], error) {
+			v, _, err := getStored[T](ctx, a, sidx)
+			return chunkView[T]{src: v, shape: a.chunks, at: origin}, err
+		}, nil
 	}
 	key, n := a.storedKey(sidx), product(a.chunks)
 	spec := a.shard.innerSpec(a.storedSpec())
-	nothing := func(context.Context, []int) ([]T, error) { return filled(n, a.fill.(T)), nil }
+	nothing := func(context.Context, []int) (chunkView[T], error) { return chunkView[T]{}, nil }
 	if !a.byRange() {
-		all, err := readStored[T](ctx, a, sidx)
+		// Each chunk is a view into the shard, copied out of it only by
+		// whoever wants it on its own.
+		all, ok, err := getStored[T](ctx, a, sidx)
 		if err != nil {
 			return nil, err
 		}
-		return func(_ context.Context, local []int) ([]T, error) {
-			out := make([]T, n)
-			copyBlock(out, a.chunks, make([]int, len(local)), all, a.grid, times(local, a.chunks), a.chunks)
-			return out, nil
+		if !ok {
+			return nothing, nil
+		}
+		return func(_ context.Context, local []int) (chunkView[T], error) {
+			return chunkView[T]{src: all, shape: a.grid, at: times(local, a.chunks)}, nil
 		}, nil
 	}
 	rg := a.store.(RangeGetter)
@@ -448,27 +497,28 @@ func openStored[T Element](ctx context.Context, a *Array, sidx []int) (func(ctx 
 	if err := checkIndex(index, lo, math.MaxInt64); err != nil {
 		return nil, fmt.Errorf("zarr: %s: %w", key, err)
 	}
-	return func(ctx context.Context, local []int) ([]T, error) {
+	return func(ctx context.Context, local []int) (chunkView[T], error) {
 		k := 0
 		for d := range local {
 			k = k*a.perShard[d] + local[d]
 		}
 		o, l, ok, err := entrySpan(index, k, math.MaxInt64)
 		if err != nil {
-			return nil, fmt.Errorf("zarr: %s: %w", key, err)
+			return chunkView[T]{}, fmt.Errorf("zarr: %s: %w", key, err)
 		}
 		if !ok {
 			return nothing(ctx, local)
 		}
 		b, err := rg.GetRange(ctx, key, int64(o), int64(l))
 		if err != nil {
-			return nil, err
+			return chunkView[T]{}, err
 		}
 		v, err := a.shard.inner.decode(b, spec)
 		if err != nil {
-			return nil, fmt.Errorf("zarr: %s chunk %v: %w", key, local, err)
+			return chunkView[T]{}, fmt.Errorf("zarr: %s chunk %v: %w", key, local, err)
 		}
-		return asChunk[T](v, n, key)
+		c, err := asChunk[T](v, n, key)
+		return chunkView[T]{src: c, shape: a.chunks, at: origin}, err
 	}, nil
 }
 
@@ -542,6 +592,14 @@ func (a *Array) overlap(idx, start, shape, cell []int) (at, n []int, whole bool)
 	return at, n, whole
 }
 
+func plus(a []int, b []int) []int {
+	out := make([]int, len(a))
+	for k := range a {
+		out[k] = a[k] + b[k]
+	}
+	return out
+}
+
 func minus(a []int, b []int) []int {
 	out := make([]int, len(a))
 	for k := range a {
@@ -565,20 +623,44 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 	if n, _ := elements(shape); n > math.MaxInt/a.meta.DataType.Size() {
 		return nil, fmt.Errorf("zarr: a region of %v is more than can be held in memory", shape)
 	}
-	out := make([]T, product(shape))
 	if empty {
-		return out, nil
+		return make([]T, product(shape)), nil
 	}
-	// Each chunk goes to a block of out that is its own, so the chunks are
-	// read in as many goroutines as the array allows.
 	slo, shi := a.shardOf(lo), a.shardOf(hi)
-	chunk := func(ctx context.Context, read func(ctx context.Context, local []int) ([]T, error), idx, first []int) error {
-		buf, err := read(ctx, minus(idx, first))
+	if spanLen(lo, hi) == 1 {
+		// A region that is one whole chunk, inside the array, is that chunk
+		// as it was decoded, if it is not part of a bigger one.
+		if _, n, whole := a.overlap(lo, start, shape, a.chunks); whole && slices.Equal(n, a.chunks) {
+			read, err := openStored[T](ctx, a, slo)
+			if err != nil {
+				return nil, err
+			}
+			v, err := read(ctx, minus(lo, times(slo, a.perShard)))
+			if err != nil {
+				return nil, err
+			}
+			return v.chunk(a), nil
+		}
+	}
+	out := make([]T, product(shape))
+	// Each chunk goes to a block of out that is its own, so the chunks are
+	// read in as many goroutines as the array allows. A chunk never written
+	// is filled straight into out, and out is already all zero.
+	var zero T
+	fill := a.fill.(T)
+	chunk := func(ctx context.Context, read func(ctx context.Context, local []int) (chunkView[T], error), idx, first []int) error {
+		v, err := read(ctx, minus(idx, first))
 		if err != nil {
 			return err
 		}
 		at, n, _ := a.overlap(idx, start, shape, a.chunks)
-		copyBlock(out, shape, minus(at, start), buf, a.chunks, minus(at, times(idx, a.chunks)), n)
+		if v.src == nil {
+			if fill != zero || fill != fill {
+				fillBlock(out, shape, minus(at, start), n, fill)
+			}
+			return nil
+		}
+		copyBlock(out, shape, minus(at, start), v.src, v.shape, plus(v.at, minus(at, times(idx, a.chunks))), n)
 		return nil
 	}
 	if !a.byRange() {
@@ -604,7 +686,7 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 	// itself in out, so all of them together are a part in thousands of what
 	// is being read; and a shard whose index is broken fails before a single
 	// chunk is fetched.
-	readers := make([]func(ctx context.Context, local []int) ([]T, error), spanLen(slo, shi))
+	readers := make([]func(ctx context.Context, local []int) (chunkView[T], error), spanLen(slo, shi))
 	err = eachSpan(ctx, a.limit(len(readers)), slo, shi, func(ctx context.Context, n int, sidx []int) error {
 		read, err := openStored[T](ctx, a, sidx)
 		if err != nil {
@@ -692,35 +774,58 @@ func eachIndex(lo, hi []int, f func(idx []int) error) error {
 // copyBlock copies the block of shape n at srcAt in src, an array of
 // srcShape, to dstAt in dst, an array of dstShape.
 func copyBlock[T any](dst []T, dstShape, dstAt []int, src []T, srcShape, srcAt, n []int) {
+	eachRun(dstShape, dstAt, srcShape, srcAt, n, func(di, si, l int) { copy(dst[di:di+l], src[si:si+l]) })
+}
+
+// fillBlock sets the block of shape n at at in dst, an array of shape, to v.
+func fillBlock[T any](dst []T, shape, at, n []int, v T) {
+	eachRun(shape, at, shape, at, n, func(di, _, l int) {
+		s := dst[di : di+l]
+		for i := range s {
+			s[i] = v
+		}
+	})
+}
+
+// eachRun calls f with each run of the block of shape n at dstAt in an array
+// of dstShape and at srcAt in one of srcShape: where it begins in each, and
+// how long it is. The dimensions the block spans whole in both arrays are one
+// run with the one before them, so a block of whole rows is a single run.
+func eachRun(dstShape, dstAt, srcShape, srcAt, n []int, f func(di, si, l int)) {
 	d := len(n)
 	if d == 0 {
-		dst[0] = src[0]
+		f(0, 0, 1)
 		return
 	}
 	if product(n) == 0 {
 		return
 	}
-	last := d - 1
-	pos := make([]int, last)
+	m := d - 1
+	for m > 0 && n[m] == dstShape[m] && n[m] == srcShape[m] {
+		m--
+	}
+	dstStride, srcStride := make([]int, d), make([]int, d)
+	di, si := 0, 0
+	for k, ds, ss := d-1, 1, 1; k >= 0; k-- {
+		dstStride[k], srcStride[k] = ds, ss
+		di += dstAt[k] * ds
+		si += srcAt[k] * ss
+		ds *= dstShape[k]
+		ss *= srcShape[k]
+	}
+	l := n[m] * dstStride[m]
+	pos := make([]int, m)
 	for {
-		di, si := 0, 0
-		dstStride, srcStride := 1, 1
-		for k := last; k >= 0; k-- {
-			p := 0
-			if k < last {
-				p = pos[k]
-			}
-			di += (dstAt[k] + p) * dstStride
-			si += (srcAt[k] + p) * srcStride
-			dstStride *= dstShape[k]
-			srcStride *= srcShape[k]
-		}
-		copy(dst[di:di+n[last]], src[si:si+n[last]])
-		k := last - 1
+		f(di, si, l)
+		k := m - 1
 		for ; k >= 0; k-- {
+			di += dstStride[k]
+			si += srcStride[k]
 			if pos[k]++; pos[k] < n[k] {
 				break
 			}
+			di -= n[k] * dstStride[k]
+			si -= n[k] * srcStride[k]
 			pos[k] = 0
 		}
 		if k < 0 {
