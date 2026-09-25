@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -162,7 +163,25 @@ func FuzzMetadata(f *testing.F) {
   "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
   "codecs": [{"name": "bytes", "configuration": {"endian": "big"}}, {"name": "gzip", "configuration": {"level": 1}}, "crc32c"],
   "fill_value": "NaN", "attributes": {"foo": 42}, "future": {"must_understand": false, "anything": 1}}`))
+	// Metadata that is valid but not plain, which decodes the slow way.
+	for _, meta := range []string{
+		`{"zarr_format": 3, "node_type": "group", "attributes": {"a": 1, "a": [2], "\u00e9": "\"}\"", "é": {}}}`,
+		`{"zarr_format": 3, "node_type": "group", "Attributes": {"a": 1}, "attributes": {"b": 2}}`,
+		`{"zarr_format": 3, "zarr_format": 2, "node_type": "\u0067roup"}`,
+		`{"zarr_format": 3.0, "node_type": "group", "attributes": null}`,
+		`{"ZARR_FORMAT": 3, "node_type": "group", "future": {"must_understand": true}, "past": {"must_understand": false}}`,
+		` {"zarr_format":3,"node_type":"group","x":{"must_understand":false},"x":{"must_understand":true}} `,
+		`null`,
+		`[]`,
+		`{"chunk_shape": [2, -0, 1e1], "codecs": ["bytes", {"name": "gzip", "configuration": {"level": 1}, "must_understand": true}],
+  "index_codecs": [{"name": "bytes", "Name": "crc32c"}], "index_location": "end", "other": [{}]}`,
+		`{"chunk_shape": [123456789012345678, 1234567890123456789], "codecs": [], "index_location": "\u0065nd"}`,
+		` "bytes" `,
+	} {
+		f.Add([]byte(meta))
+	}
 	f.Fuzz(func(t *testing.T, meta []byte) {
+		checkOnePass(t, meta)
 		s := NewMemoryStore()
 		s.Set(ctx, "zarr.json", meta)
 		checkAllocated(t, len(meta), func() {
@@ -193,6 +212,54 @@ func FuzzMetadata(f *testing.F) {
 			readSome(t, a, 0)
 		})
 	})
+}
+
+// checkOnePass fails if decodeMetadata decodes meta other than
+// decodeMetadataSlowly does.
+func checkOnePass(t *testing.T, meta []byte) {
+	t.Helper()
+	for _, c := range []struct {
+		node       string
+		known      map[string]bool
+		fast, slow any
+	}{
+		{"array", arrayKeys, new(ArrayMetadata), new(ArrayMetadata)},
+		{"group", groupKeys, new(GroupMetadata), new(GroupMetadata)},
+	} {
+		if !decodeMetadata(meta, c.node, c.known, c.fast) {
+			continue
+		}
+		if err := decodeMetadataSlowly(meta, "", c.node, c.known, c.slow); err != nil {
+			t.Fatalf("decoded in one pass as an %s, but refused the slow way: %v", c.node, err)
+		}
+		if !reflect.DeepEqual(c.fast, c.slow) {
+			t.Fatalf("decoded in one pass as\n%#v\nand the slow way as\n%#v", c.fast, c.slow)
+		}
+	}
+	// So do a codec's name and configuration, and the configuration of
+	// sharding, which the fuzzer may make of metadata.
+	var n Named
+	if n.decode(meta) {
+		var slow Named
+		if b := bytes.TrimSpace(meta); b[0] == '"' {
+			err := json.Unmarshal(b, &slow.Name)
+			if err != nil || !reflect.DeepEqual(n, slow) {
+				t.Fatalf("name decoded in one pass as %#v, and the slow way as %#v, %v", n, slow, err)
+			}
+		} else {
+			var j namedJSON
+			err := json.Unmarshal(b, &j)
+			if err != nil || !reflect.DeepEqual(n, Named(j)) {
+				t.Fatalf("name decoded in one pass as %#v, and the slow way as %#v, %v", n, j, err)
+			}
+		}
+	}
+	var fast, slow shardingJSON
+	if decodeObject(meta, shardingKeys, fast.field) {
+		if err := json.Unmarshal(meta, &slow); err != nil || !reflect.DeepEqual(fast, slow) {
+			t.Fatalf("configuration decoded in one pass as %#v, and the slow way as %#v, %v", fast, slow, err)
+		}
+	}
 }
 
 // readSome reads a few elements of the array from a place at picks, as its
@@ -312,19 +379,34 @@ func FuzzBytesCodec(f *testing.F) {
 			shape[0] = int(n)
 		}
 		spec := ChunkSpec{Shape: shape, DataType: d}
+		var v any
+		var back []byte
 		checkAllocated(t, len(data), func() {
-			v, err := c.DecodeArray(data, spec)
-			if err != nil {
+			var err error
+			if v, err = c.DecodeArray(data, spec); err != nil {
 				return
 			}
-			back, err := c.EncodeArray(v, spec)
-			if err != nil {
+			if back, err = c.EncodeArray(v, spec); err != nil {
 				t.Fatal(err)
 			}
 			if d != Bool && !bytes.Equal(back, data) {
 				t.Fatalf("decoded and encoded again to\n%x\nnot\n%x", back, data)
 			}
 		})
+		if v == nil {
+			return
+		}
+		// What encoding/binary, element by element, makes of the same bytes.
+		order := must(c.order(d))
+		want := makeSlice(d, len(data)/d.Size())
+		must(binary.Decode(data, order, want))
+		wantBytes := must(binary.Append(nil, order, want))
+		if got := must(binary.Append(nil, order, v)); !bytes.Equal(got, wantBytes) {
+			t.Fatalf("decoded to\n%x\nnot, as encoding/binary has it,\n%x", got, wantBytes)
+		}
+		if !bytes.Equal(back, wantBytes) {
+			t.Fatalf("encoded to\n%x\nnot, as encoding/binary has it,\n%x", back, wantBytes)
+		}
 	})
 }
 
