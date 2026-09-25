@@ -48,15 +48,35 @@ const (
 // noChunk is a shard index's offset and length for a chunk it does not hold.
 const noChunk = math.MaxUint64
 
-func parseSharding(cfg json.RawMessage, d DataType) (Codec, error) {
-	var j struct {
-		ChunkShape    []int         `json:"chunk_shape"`
-		Codecs        []Named       `json:"codecs"`
-		IndexCodecs   []Named       `json:"index_codecs"`
-		IndexLocation IndexLocation `json:"index_location"`
+// shardingJSON is the configuration of a sharding_indexed codec.
+type shardingJSON struct {
+	ChunkShape    []int         `json:"chunk_shape"`
+	Codecs        []Named       `json:"codecs"`
+	IndexCodecs   []Named       `json:"index_codecs"`
+	IndexLocation IndexLocation `json:"index_location"`
+}
+
+var shardingKeys = []string{"chunk_shape", "codecs", "index_codecs", "index_location"}
+
+func (j *shardingJSON) field(key string) any {
+	switch key {
+	case "chunk_shape":
+		return &j.ChunkShape
+	case "codecs":
+		return &j.Codecs
+	case "index_codecs":
+		return &j.IndexCodecs
 	}
-	if err := json.Unmarshal(cfg, &j); err != nil {
-		return nil, fmt.Errorf("zarr: sharding_indexed codec: %w", err)
+	return &j.IndexLocation
+}
+
+func parseSharding(cfg json.RawMessage, d DataType) (Codec, error) {
+	var j shardingJSON
+	if !decodeObject(cfg, shardingKeys, j.field) {
+		j = shardingJSON{}
+		if err := json.Unmarshal(cfg, &j); err != nil {
+			return nil, fmt.Errorf("zarr: sharding_indexed codec: %w", err)
+		}
 	}
 	if j.ChunkShape == nil || j.Codecs == nil || j.IndexCodecs == nil {
 		return nil, fmt.Errorf("zarr: sharding_indexed codec needs chunk_shape, codecs and index_codecs: %s", cfg)

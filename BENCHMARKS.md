@@ -63,18 +63,27 @@ A gzip 5 read spends 62% of its time in `compress/flate`, and the bytes
 codec and the copies take about 15% more.
 
 A whole read allocates about 4 times the raster: 65 MB for a 16 MB float32
-raster.
+raster. Of that, the store's copy, the decoded chunk and `out` itself are 3
+times; the rest is the codecs' own buffers. A shard read whole no longer adds
+a fourth copy of each chunk, which took 84 MB off to 68 MB for a raster in
+shards of 1024; the store's copy and the decoded chunk are left for a codec
+that can decode into `out`.
 
 ### Windows (float32, gzip 5)
 
 | window | chunk 512 | chunk 256 | chunk 512, no codec |
 |---|---:|---:|---:|
-| one pixel | 9.1 ms | 2.3 ms | 0.9 ms |
-| 3×3 across a chunk corner | 12.2 ms | 3.0 ms | 1.5 ms |
-| 256² aligned | 9.2 ms | 2.4 ms | 0.9 ms |
-| 256² across four chunks | 12.6 ms | 3.1 ms | 1.4 ms |
-| a row of 2048 | 11.1 ms | 5.4 ms | 1.5 ms |
-| 1024² aligned | 12.6 ms | 11.9 ms | 2.1 ms |
+| one pixel | 7.2 ms | 1.8 ms | 0.6 ms |
+| 3×3 across a chunk corner | 8.7 ms | 2.2 ms | 0.8 ms |
+| 256² aligned | 7.2 ms | 1.8 ms | 0.7 ms |
+| 256² across four chunks | 8.8 ms | 2.1 ms | 0.9 ms |
+| a row of 2048 | 8.2 ms | 4.1 ms | 0.9 ms |
+| 1024² aligned | 9.3 ms | 8.9 ms | 1.1 ms |
+
+These are from a later run, on a VM of the same kind at 2.30 GHz, of 5 runs
+each. A window that is one whole chunk is that chunk as it was decoded, with
+no copy into a region of its own: a quarter less allocated for 256² aligned
+in chunks of 256.
 
 Every window decodes whole chunks: a pixel costs a whole chunk, and a 3×3
 window across a corner costs four.
@@ -103,20 +112,26 @@ These figures are from a later run than the rest, on the same machine.
 
 | operation | memory | dir | round trips |
 |---|---:|---:|---:|
-| `OpenArray`, no attributes | 26 µs | 32 µs | 1 get |
-| `OpenArray`, 50 attributes | 160 µs | 170 µs | 1 get |
-| `OpenArray`, sharded, no attributes | 55 µs | 63 µs | 1 get |
-| `OpenGroup`, no attributes / 50 | 2.9 / 130 µs | 7.4 / 140 µs | 1 get |
+| `OpenArray`, no attributes | 7.7 µs | 15 µs | 1 get |
+| `OpenArray`, 50 attributes | 27 µs | 34 µs | 1 get |
+| `OpenArray`, sharded, no attributes | 16 µs | 23 µs | 1 get |
+| `OpenGroup`, no attributes / 50 | 0.6 / 20 µs | 6.5 / 27 µs | 1 get |
 | `CreateArray`, no attributes | 18 µs | 0.2 ms | 1 get, 1 set |
 | `SetAttributes`, on 50 | 64 µs | 140 µs | 1 set |
 | `Attribute("crs_wkt")` | 3.4 µs | | none |
 | open something that is not there | 1.4 µs | | 4 gets |
 | `Children`, 10 / 100 / 1000 | 0.1 / 0.9 / 10 ms | 0.2 / 1.6 / 16 ms | 1 list + 1 get each |
-| a group and its 10 / 100 arrays opened | 0.6 / 5.0 ms | 0.7 / 6.6 ms | 21 / 201 gets |
+| a group and its 10 / 100 arrays opened | 0.2 / 2.3 ms | 0.4 / 3.5 ms | 21 / 201 gets |
 
-`readMetadata` unmarshals each `zarr.json` three times: into a map of fields,
-into its version and node type, and into the metadata itself. That is why
-attributes cost so much.
+`readMetadata` used to unmarshal each `zarr.json` three times: into a map of
+fields, into its version and node type, and into the metadata itself. It
+now reads it in one pass, splitting the attributes without decoding them,
+and the codecs and chunk grid are read the same way. The rows for opening
+were measured again after that, on a VM of the same kind at 2.80 GHz, where
+before they were 34, 181, 64, 3.9 / 154 µs and 0.6 / 5.8 ms: 3 to 7 times
+less. Writing is as it was: `json.MarshalIndent` compacts each attribute and
+indents the whole again, and writing the same bytes any other way means
+doing both of those by hand.
 
 ## What to make faster
 
@@ -149,20 +164,24 @@ object store.
 6. **Copy less on a read.** The store's copy, the decoded chunk and the copy
    into `out` are 30% of an uncompressed read and 4 times the raster in
    allocations. A chunk that covers its part of `out` exactly could be
-   decoded straight into it.
+   decoded straight into it, which needs codecs that decode into a slice
+   they are given. Done already: a chunk of a shard read whole is copied
+   from the shard straight into `out`, a region that is one chunk is that
+   chunk, and a block of whole rows is copied at once.
 7. **Cache decoded chunks for windowed reads.** A pixel costs a whole
    chunk (9 ms at 512, gzip), and a focal window across a chunk corner
    costs four. An LRU of decoded chunks in the adapter, like the block cache
    of strata's `cog`, would cut that to one decode per chunk. Chunks of 256
    make small windows 4 times cheaper and cost nothing on whole reads.
-8. **Parse `zarr.json` once.** Unmarshalling it once rather than three
-   times would make `OpenArray` about 3 times cheaper. That matters only
-   when opening hundreds of arrays, after items 1 and 2.
+8. ~~**Parse `zarr.json` once.**~~ Done: `OpenArray` is 3 to 7 times
+   cheaper, the most with many attributes.
 
 Smaller things:
 
-- A chunk that was never written is filled and then copied. It could be
-  filled straight into `out`; sparse reads run at 2 GB/s.
+- Done: a chunk that was never written is filled straight into `out`, and
+  not at all when the fill is zero. A sparse read of the raster went from
+  5.0 to 1.3 ms (fill 0) and from 5.4 to 1.8 ms (NaN), 13 and 9 GB/s, and
+  allocates the raster once rather than twice.
 - `CRC32CCodec.EncodeBytes` copies the whole chunk to append 4 bytes.
 - Opening something that is not there costs 4 gets, because it looks for
   version 2 metadata too. An adapter that checks whether an array exists
