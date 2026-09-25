@@ -239,7 +239,8 @@ type BytesCodec struct {
 
 func parseBytes(cfg json.RawMessage, d DataType) (Codec, error) {
 	var c BytesCodec
-	if len(cfg) > 0 {
+	if len(cfg) > 0 && !decodeObject(cfg, []string{"endian"}, func(string) any { return &c.Endian }) {
+		c = BytesCodec{}
 		if err := json.Unmarshal(cfg, &c); err != nil {
 			return nil, fmt.Errorf("zarr: bytes codec: %w", err)
 		}
