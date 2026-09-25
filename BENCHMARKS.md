@@ -28,8 +28,8 @@ compresses much without shuffle, which is typical of real float rasters.
 
 | codec | read, 1 core | read, 4 | write, 1 core | write, 4 | ratio |
 |---|---:|---:|---:|---:|---:|
-| none | 2074 MB/s | 4008 MB/s | 2368 MB/s | 3813 MB/s | 1.00 |
-| crc32c | 1885 | 3161 | 1581 | 2755 | 1.00 |
+| none | 1920 MB/s | 4378 MB/s | 2373 MB/s | 3659 MB/s | 1.00 |
+| crc32c | 1565 | 2919 | 1428 | 2828 | 1.00 |
 | gzip 1 | 108 | 360 | 156 | 415 | 1.16 |
 | gzip 5 | 105 | 361 | 42 | 164 | 1.16 |
 | gzip 9 | 109 | 379 | 44 | 156 | 1.16 |
@@ -38,11 +38,11 @@ compresses much without shuffle, which is typical of real float rasters.
 | zstd 1 (`zstd` module) | – | 1871 | – | 1624 | 1.00 |
 | zstd 3 (`zstd` module) | – | 2062 | – | 1996 | 1.00 |
 
-The rows `none` and `crc32c` are from after the bytes codec copied rather
-than decoded element by element (item 5 below), the median of 5 runs. The
-same runs measured the old code at 813 and 797 MB/s for a read on one core,
-lower than the 1041 and 971 above, so the VM was about a fifth slower that
-day and the gain is larger than the rows show against each other.
+The rows `none` and `crc32c` are from after items 5 and 6 below, the
+median of 5 runs. The same runs measured the code of item 6 alone at 779
+and 723 MB/s for a read on one core, where the first runs had 1041 and
+971, so the VM was about a quarter slower that day and the gain is larger
+than the rows show against the others.
 
 zstd did not compress this raster at all (a ratio of 1.00). It skips blocks
 it finds incompressible, so its speed here is close to that of `none` and
@@ -62,8 +62,8 @@ The profile of an uncompressed read, one core:
 
 | | |
 |---|---:|
-| `memmove` + `memclr` (copies: store → decode → `out`, and new buffers cleared) | 90% |
-| of which the bytes codec (`BytesCodec.DecodeArray`: allocate, clear, copy) | 28% |
+| `memmove` + `memclr` (copies: store → decode → `out`, and new buffers cleared) | 92% |
+| of which the bytes codec (`BytesCodec.DecodeArray`: allocate, clear, copy) | 26% |
 
 A gzip 5 read spends 62% of its time in `compress/flate`, and the bytes
 codec and the copies take about 15% more.
