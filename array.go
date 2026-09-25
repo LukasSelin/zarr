@@ -151,8 +151,11 @@ func newArray(s Store, path string, m ArrayMetadata) (*Array, error) {
 	var grid struct {
 		ChunkShape []int `json:"chunk_shape"`
 	}
-	if err := json.Unmarshal(m.ChunkGrid.Configuration, &grid); err != nil {
-		return nil, bad("chunk grid: %v", err)
+	if !decodeObject(m.ChunkGrid.Configuration, []string{"chunk_shape"}, func(string) any { return &grid.ChunkShape }) {
+		grid.ChunkShape = nil
+		if err := json.Unmarshal(m.ChunkGrid.Configuration, &grid); err != nil {
+			return nil, bad("chunk grid: %v", err)
+		}
 	}
 	a.grid = grid.ChunkShape
 	if len(a.grid) != len(m.Shape) {
