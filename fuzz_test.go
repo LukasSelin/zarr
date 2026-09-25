@@ -312,19 +312,34 @@ func FuzzBytesCodec(f *testing.F) {
 			shape[0] = int(n)
 		}
 		spec := ChunkSpec{Shape: shape, DataType: d}
+		var v any
+		var back []byte
 		checkAllocated(t, len(data), func() {
-			v, err := c.DecodeArray(data, spec)
-			if err != nil {
+			var err error
+			if v, err = c.DecodeArray(data, spec); err != nil {
 				return
 			}
-			back, err := c.EncodeArray(v, spec)
-			if err != nil {
+			if back, err = c.EncodeArray(v, spec); err != nil {
 				t.Fatal(err)
 			}
 			if d != Bool && !bytes.Equal(back, data) {
 				t.Fatalf("decoded and encoded again to\n%x\nnot\n%x", back, data)
 			}
 		})
+		if v == nil {
+			return
+		}
+		// What encoding/binary, element by element, makes of the same bytes.
+		order := must(c.order(d))
+		want := makeSlice(d, len(data)/d.Size())
+		must(binary.Decode(data, order, want))
+		wantBytes := must(binary.Append(nil, order, want))
+		if got := must(binary.Append(nil, order, v)); !bytes.Equal(got, wantBytes) {
+			t.Fatalf("decoded to\n%x\nnot, as encoding/binary has it,\n%x", got, wantBytes)
+		}
+		if !bytes.Equal(back, wantBytes) {
+			t.Fatalf("encoded to\n%x\nnot, as encoding/binary has it,\n%x", back, wantBytes)
+		}
 	})
 }
 
