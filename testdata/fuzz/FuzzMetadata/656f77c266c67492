@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"zarr_format\":3,\"node_type\":\"group\",\"attributes\":")

@@ -239,7 +239,8 @@ type BytesCodec struct {
 
 func parseBytes(cfg json.RawMessage, d DataType) (Codec, error) {
 	var c BytesCodec
-	if len(cfg) > 0 {
+	if len(cfg) > 0 && !decodeObject(cfg, []string{"endian"}, func(string) any { return &c.Endian }) {
+		c = BytesCodec{}
 		if err := json.Unmarshal(cfg, &c); err != nil {
 			return nil, fmt.Errorf("zarr: bytes codec: %w", err)
 		}
@@ -285,6 +286,25 @@ func (c BytesCodec) EncodeArray(chunk any, spec ChunkSpec) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	switch s := chunk.(type) {
+	case []bool:
+		out := make([]byte, len(s))
+		for i, x := range s {
+			if x {
+				out[i] = 1
+			}
+		}
+		return out, nil
+	case []int8, []int16, []int32, []int64, []uint8, []uint16, []uint32, []uint64, []float32, []float64:
+		from, size := bytesOf(s)
+		out := make([]byte, len(from))
+		if size == 1 || order == nativeOrder {
+			copy(out, from)
+		} else {
+			swapBytes(out, from, size)
+		}
+		return out, nil
+	}
 	return binary.Append(nil, order, chunk)
 }
 
@@ -303,10 +323,51 @@ func (c BytesCodec) DecodeArray(data []byte, spec ChunkSpec) (any, error) {
 		return nil, fmt.Errorf("zarr: chunk is %d bytes, not the %d of %d %s", len(data), n*d.Size(), n, d)
 	}
 	s := makeSlice(d, n)
-	if _, err := binary.Decode(data, order, s); err != nil {
-		return nil, err
+	if b, ok := s.([]bool); ok {
+		// Any byte but 0 is true, as encoding/binary has it. A bool must
+		// not be copied into: one of a byte other than 0 or 1 is not valid.
+		for i, x := range data {
+			b[i] = x != 0
+		}
+		return s, nil
+	}
+	to, width := bytesOf(s)
+	if width == 1 || order == nativeOrder {
+		copy(to, data)
+	} else {
+		swapBytes(to, data, width)
 	}
 	return s, nil
+}
+
+// nativeOrder is the byte order of the machine.
+var nativeOrder binary.ByteOrder = func() binary.ByteOrder {
+	if binary.NativeEndian.Uint16([]byte{1, 0}) == 1 {
+		return binary.LittleEndian
+	}
+	return binary.BigEndian
+}()
+
+// swapBytes copies src to dst, which is as long, reversing the bytes of each
+// element of size bytes. Each element is sliced to its size, length and
+// capacity both, which lets the compiler drop the bounds checks.
+func swapBytes(dst, src []byte, size int) {
+	le, be := binary.LittleEndian, binary.BigEndian
+	dst = dst[:len(src)]
+	switch size {
+	case 2:
+		for i := 0; i+2 <= len(src); i += 2 {
+			le.PutUint16(dst[i:i+2:i+2], be.Uint16(src[i:i+2:i+2]))
+		}
+	case 4:
+		for i := 0; i+4 <= len(src); i += 4 {
+			le.PutUint32(dst[i:i+4:i+4], be.Uint32(src[i:i+4:i+4]))
+		}
+	case 8:
+		for i := 0; i+8 <= len(src); i += 8 {
+			le.PutUint64(dst[i:i+8:i+8], be.Uint64(src[i:i+8:i+8]))
+		}
+	}
 }
 
 // GzipCodec compresses with gzip at a level from 0 to 9.
@@ -429,7 +490,11 @@ func (CRC32CCodec) Name() string       { return "crc32c" }
 func (CRC32CCodec) Configuration() any { return nil }
 
 func (CRC32CCodec) EncodeBytes(data []byte) ([]byte, error) {
-	return binary.LittleEndian.AppendUint32(append([]byte(nil), data...), crc32.Checksum(data, castagnoli)), nil
+	// data may be the caller's, even past its length, so it is copied once
+	// into a buffer that has room for the checksum.
+	out := make([]byte, len(data), len(data)+4)
+	copy(out, data)
+	return binary.LittleEndian.AppendUint32(out, crc32.Checksum(data, castagnoli)), nil
 }
 
 func (CRC32CCodec) DecodeBytes(data []byte) ([]byte, error) {

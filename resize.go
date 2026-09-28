@@ -10,18 +10,23 @@ import (
 // end of the array set to the fill value: in data itself if owned, and in a
 // copy otherwise.
 func fillPastEnd[T Element](a *Array, sidx []int, data []T, owned bool) []T {
-	origin := times(sidx, a.grid)
-	for k := range a.grid {
+	return fillPast(a, times(sidx, a.grid), a.grid, data, owned)
+}
+
+// fillPast is fillPastEnd for data of shape at origin in the array: a stored
+// object, or a chunk of a shard.
+func fillPast[T Element](a *Array, origin, shape []int, data []T, owned bool) []T {
+	for k := range shape {
 		in := max(a.meta.Shape[k]-origin[k], 0)
-		if in >= a.grid[k] {
+		if in >= shape[k] {
 			continue
 		}
 		if !owned {
 			data, owned = slices.Clone(data), true
 		}
-		at, n := make([]int, len(a.grid)), slices.Clone(a.grid)
-		at[k], n[k] = in, a.grid[k]-in
-		copyBlock(data, a.grid, at, filled(product(n), a.fill.(T)), n, make([]int, len(n)), n)
+		at, n := make([]int, len(shape)), slices.Clone(shape)
+		at[k], n[k] = in, shape[k]-in
+		copyBlock(data, shape, at, filled(product(n), a.fill.(T)), n, make([]int, len(n)), n)
 	}
 	return data
 }

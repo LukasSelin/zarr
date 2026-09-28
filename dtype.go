@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"unsafe"
 )
 
 // DataType is the type of an array's elements, as named in its metadata.
@@ -111,6 +112,43 @@ func makeSlice(d DataType, n int) any {
 		return make([]float64, n)
 	}
 	return nil
+}
+
+// bytesOf is the memory of s, a []T of a data type other than bool, as bytes,
+// and the size of an element. The bytes are s's own, in the machine's order:
+// a write to one is a write to the other. A bool is left out because a byte
+// other than 0 or 1 written to one is not a valid bool.
+func bytesOf(s any) ([]byte, int) {
+	switch s := s.(type) {
+	case []int8:
+		return rawBytes(s)
+	case []int16:
+		return rawBytes(s)
+	case []int32:
+		return rawBytes(s)
+	case []int64:
+		return rawBytes(s)
+	case []uint8:
+		return s, 1
+	case []uint16:
+		return rawBytes(s)
+	case []uint32:
+		return rawBytes(s)
+	case []uint64:
+		return rawBytes(s)
+	case []float32:
+		return rawBytes(s)
+	case []float64:
+		return rawBytes(s)
+	}
+	return nil, 0
+}
+
+func rawBytes[T int8 | int16 | int32 | int64 | uint16 | uint32 | uint64 | float32 | float64](s []T) ([]byte, int) {
+	size := int(unsafe.Sizeof(*new(T)))
+	// Every bit pattern is a valid T, and a T is aligned at least as a byte
+	// is, so its memory may be read and written as bytes.
+	return unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(s))), len(s)*size), size
 }
 
 func goType(d DataType) reflect.Type { return reflect.TypeOf(makeSlice(d, 0)).Elem() }
