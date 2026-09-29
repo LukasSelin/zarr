@@ -136,35 +136,42 @@ func ValidPrefix(prefix string) error { return checkPrefix(prefix) }
 
 // checkKey refuses keys that could reach outside a store.
 func checkKey(key string) error {
-	if key == "" || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") || strings.ContainsAny(key, "\\:") {
+	if !validSegments(key, false, false) {
 		return fmt.Errorf("zarr: bad key %q", key)
-	}
-	for _, seg := range strings.Split(key, "/") {
-		if seg == "" || seg == "." || seg == ".." {
-			return fmt.Errorf("zarr: bad key %q", key)
-		}
 	}
 	return nil
 }
 
-// checkPrefix refuses prefixes that could reach outside a store.
+// checkPrefix refuses prefixes that could reach outside a store. "" is
+// every key, and its one segment is the empty last one.
 func checkPrefix(prefix string) error {
-	if prefix == "" {
-		return nil
-	}
-	bad := func() error { return fmt.Errorf("zarr: bad prefix %q", prefix) }
-	if strings.HasPrefix(prefix, "/") || strings.ContainsAny(prefix, "\\:") {
-		return bad()
-	}
-	segs := strings.Split(prefix, "/")
-	for i, seg := range segs {
-		// The last segment may be "" - a prefix ending in "/" - or part of
-		// a name; no other may be empty, and none may be "." or "..".
-		if seg == "." || seg == ".." || (seg == "" && i != len(segs)-1) {
-			return bad()
-		}
+	if !validSegments(prefix, true, false) {
+		return fmt.Errorf("zarr: bad prefix %q", prefix)
 	}
 	return nil
+}
+
+// validSegments reports whether s is "/"-separated segments none of which is
+// empty, "." or "..", or holds a backslash or ":". lastMayBeEmpty lets the last
+// segment be "" - s ending in "/", or being "" - and reserved refuses
+// segments beginning "__", which the specification keeps for itself. A
+// leading or doubled "/" makes an empty segment, so needs no rule of its own.
+func validSegments(s string, lastMayBeEmpty, reserved bool) bool {
+	if strings.ContainsAny(s, `\:`) {
+		return false
+	}
+	segs := strings.Split(s, "/")
+	for i, seg := range segs {
+		switch {
+		case seg == "." || seg == "..":
+			return false
+		case seg == "" && !(lastMayBeEmpty && i == len(segs)-1):
+			return false
+		case reserved && strings.HasPrefix(seg, "__"):
+			return false
+		}
+	}
+	return true
 }
 
 // MemoryStore is a Store held in memory.
