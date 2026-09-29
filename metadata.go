@@ -133,16 +133,8 @@ var groupKeys = map[string]bool{"zarr_format": true, "node_type": true, "attribu
 // checkPath refuses node paths the specification does not allow. The root
 // is "".
 func checkPath(path string) error {
-	if path == "" {
-		return nil
-	}
-	if strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {
+	if path != "" && !validSegments(path, false, true) {
 		return fmt.Errorf("zarr: bad path %q", path)
-	}
-	for _, seg := range strings.Split(path, "/") {
-		if seg == "" || seg == "." || seg == ".." || strings.HasPrefix(seg, "__") || strings.ContainsAny(seg, "\\:") {
-			return fmt.Errorf("zarr: bad path %q", path)
-		}
 	}
 	return nil
 }
