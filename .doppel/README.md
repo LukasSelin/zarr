@@ -16,5 +16,6 @@ Baseline when recorded (mean rank per class): merge 39.0 (1/1 retrieved) · refa
 The benchmark's hard assertions fail at this baseline; that failure is what a
 false-positive fix is measured against.
 
-Pairs whose two sides share a qualified name (two `main.main`s, two `init`s, a helper
-duplicated across two JS files) cannot be expressed in this format and are absent.
+A side may pin its file with `aFile`/`bFile` (slash-separated, relative to the repository
+root); a pair whose two sides share a qualified name — two `main.main`s, two `init`s, a
+helper duplicated across two scripts — must pin both.
