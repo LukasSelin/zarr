@@ -17,7 +17,7 @@ ZERO=v0.0.0-00010101000000-000000000000
 root=$(cd "$(dirname "$0")/.." && pwd)
 modules=("$@")
 if [ ${#modules[@]} -eq 0 ]; then
-	modules=(s3 gcs zstd)
+	modules=(s3 gcs azblob zstd)
 fi
 
 status=0
