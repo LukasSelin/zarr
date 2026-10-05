@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        module: [".", "s3", "zstd"]
+        module: [".", "s3", "gcs", "azblob", "zstd"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -64,7 +64,7 @@ jobs:
           cache-dependency-path: "**/go.sum"
       - name: go mod tidy leaves nothing behind
         run: |
-          for m in . s3 zstd; do
+          for m in . s3 gcs azblob zstd; do
             (cd "$m" && go mod tidy)
           done
           git diff --exit-code || {
@@ -72,7 +72,7 @@ jobs:
             exit 1
           }
 
-  # Go ignores a replace directive in a dependency, so s3 and zstd are built
+  # Go ignores a replace directive in a dependency, so the sub-modules are built
   # and tested here as a consumer gets them: without the replace, against the
   # tag of the core their go.mod requires. A require of a core that was never
   # tagged, or of a tag without what the sub-module uses, fails here rather
@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: ["s3", "zstd"]
+        module: ["s3", "gcs", "azblob", "zstd"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -99,7 +99,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [".", "s3", "zstd"]
+        module: [".", "s3", "gcs", "azblob", "zstd"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -118,7 +118,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [".", "s3", "zstd"]
+        module: [".", "s3", "gcs", "azblob", "zstd"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -164,6 +164,8 @@ jobs:
             target: FuzzShard
           - module: "."
             target: FuzzShardIndex
+          - module: "."
+            target: FuzzHTTPRange
           - module: "zstd"
             target: FuzzDecode
     steps:

@@ -143,6 +143,83 @@ the SDK asked for 1.24, until govulncheck found GO-2026-5764 in the
 eventstream protocol under it: the fix is service/s3 v1.97.3, which asks
 for 1.24, so that is what the module builds with now.
 
+## Stores in Google Cloud Storage
+
+`github.com/LukasSelin/zarr/gcs` is a module of its own, over
+`cloud.google.com/go/storage`. It is what the S3 store is: a `RangeGetter`,
+a shard's index at its end being one request, and a `DirLister`, listing
+one level with the delimiter `/`.
+
+```go
+c, _ := storage.NewClient(ctx)
+s := gcs.New(c.Bucket("my-bucket"), "fwi.zarr")
+```
+
+A key that is not there is `storage.ErrObjectNotExist`, which is
+`ErrNotFound`. GCS answers a read in a bucket that is not there the same
+way, so opening a node in a misspelt bucket is `ErrNotFound`; a listing says
+the bucket is missing. The client retries an upload only if told it is
+idempotent, which a `Set` is: give the handle
+`Retryer(storage.WithPolicy(storage.RetryAlways))` to have one retried. An
+object stored with `Content-Encoding: gzip` is served whole whatever range
+is asked for, so a range of it is an error: store shards without it. The
+module needs Go 1.25, as `cloud.google.com/go/storage` does; v1.69 and
+later ask for 1.26, so it is held at v1.68 while this repository builds with
+1.25.
+
+## Stores in Azure Blob Storage
+
+`github.com/LukasSelin/zarr/azblob` is a module of its own, over
+`github.com/Azure/azure-sdk-for-go/sdk/storage/azblob`, and a store of the
+blobs in one container:
+
+```go
+c, _ := container.NewClient("https://account.blob.core.windows.net/fwi", cred, nil)
+s := azblob.New(c, "fwi.zarr")
+```
+
+It is a `DirLister`, listing one level with the delimiter `/`, and a
+`RangeGetter`; but Blob Storage has no range for the last bytes of a blob,
+so the index at the end of a shard costs a read of the blob's properties
+and then of the range, asked for on condition that the blob is still the
+one the properties were of. A chunk in a shard is one request. A
+`BlobNotFound` is `ErrNotFound`; a `ContainerNotFound` is an error. A
+`Delete` takes a blob's snapshots with it, as Blob Storage will not delete
+one without them. The module needs Go 1.25, as the SDK does.
+
+## Stores over HTTP
+
+`zarr.NewHTTPStore` reads a hierarchy published as static files - a web
+server, a CDN, the public endpoint of a bucket - with nothing but
+`net/http`. It is read only: `Set` and `Delete` return `ErrReadOnly`, so
+`Write`, `CreateArray` and `Delete` do too.
+
+```go
+s, err := zarr.NewHTTPStore("https://example.com/fwi.zarr", nil) // or an *http.Client
+a, err := zarr.OpenArray(ctx, s, "isi")
+```
+
+The key `isi/c/0/0` is a GET of `https://example.com/fwi.zarr/isi/c/0/0`,
+each segment escaped; a query in the base URL, such as a signature, goes
+with every request. A server that wants headers gets them from the
+client's `Transport`. Plain HTTP cannot list, so `List` is an error
+wrapping `errors.ErrUnsupported`, and so are `ListDir`, `Group.Children`
+and `Delete`: open the arrays of a group by name.
+
+It is a `RangeGetter`. A range must come back a 206 whose `Content-Range`
+is the range asked for, of that many bytes; a 416 is a range outside the
+value. A server that ignores `Range` answers 200 with the whole value, and
+the range is cut out of it rather than trusted: right, but each range
+costs a read of the value up to its end. Serve shards from one that
+honours `Range`.
+
+404 and 410 are a key that is not there, which reads as fill. 403 is an
+error, saying why, unless `ForbiddenIsNotFound` is set: some hosts, the
+public endpoint of a bucket that may not be listed among them, answer 403
+for a key that is not there, and with it set a chunk the server forbids
+reads as fill. `MaxObjectBytes`, 4 GiB unless set, is the most one value
+is read to, so a server cannot make a read allocate without bound.
+
 ## zstd
 
 zstd is not in the standard library, so its codec is a module of its own,
@@ -285,8 +362,9 @@ in memory, so look at the shape of an array from a stranger before reading
 all of it.
 
 The fuzz tests hold this: metadata of either version, each codec, a shard
-and its index, and an array of either version opened and read from a store
-of fuzzed keys, none of which may panic or allocate past a bound. `go test` runs their seeds and
+and its index, an array of either version opened and read from a store of
+fuzzed keys, and a range read from a server that answers as it likes, none
+of which may panic or allocate past a bound. `go test` runs their seeds and
 `testdata/fuzz`; to fuzz one:
 
 ```sh
@@ -321,8 +399,8 @@ Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 
 ## Checks
 
-`make check` runs what CI runs, over all three modules - the root, `s3` and
-`zstd` - and `make tools` installs the two that are not in the toolchain:
+`make check` runs what CI runs, over all five modules - the root, `s3`,
+`gcs`, `azblob` and `zstd` - and `make tools` installs the two that are not in the toolchain:
 
 | Check | What it is for |
 |---|---|
@@ -332,18 +410,19 @@ Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 | `make vuln` | govulncheck, against the modules and the standard library |
 | `make fuzz` | each fuzz target for `FUZZTIME`, 30s by default |
 | `make tidy` | `go mod tidy` in each module |
-| `make published` | `s3` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
+| `make published` | `s3`, `gcs`, `azblob` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
 
-`s3` and `zstd` keep a `replace` of the core with the directory above them,
-so that their tests run against the core beside them. Go ignores a
+`gcs`, `azblob` and `zstd` keep a `replace` of the core with the directory above them,
+so that their tests run against the core beside them; `s3` has none, and
+its tests run against the tag it requires. Go ignores a
 `replace` in a dependency, so what a consumer gets is the core their
 `require` names; `make published`, and the CI job of the same purpose,
 fail if that is not a tag, or is a tag without what the sub-module uses.
 
 ## Releasing
 
-The core is tagged `vX.Y.Z` and each sub-module `s3/vX.Y.Z` or
-`zstd/vX.Y.Z`. Tag the core first; then raise the sub-modules' `require` of
+The core is tagged `vX.Y.Z` and each sub-module `s3/vX.Y.Z`,
+`gcs/vX.Y.Z`, `azblob/vX.Y.Z` or `zstd/vX.Y.Z`. Tag the core first; then raise the sub-modules' `require` of
 the core to that tag, if they need it, and commit; then tag the
 sub-modules on that commit. `make published` passes only once the core tag
 they require exists.

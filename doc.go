@@ -23,6 +23,14 @@
 // github.com/LukasSelin/zarr/zstd. Not yet here: transpose, float16,
 // complex and raw data types, storage transformers.
 //
+// NewHTTPStore reads a store published as static files over plain HTTP,
+// with Range requests for the parts of a shard. It is read only, and cannot
+// list: Set and Delete return an error wrapping ErrReadOnly, and List one
+// wrapping errors.ErrUnsupported. A store in S3, which can be written and
+// listed, is in the module github.com/LukasSelin/zarr/s3, one in Google
+// Cloud Storage in github.com/LukasSelin/zarr/gcs, and one in Azure Blob
+// Storage in github.com/LukasSelin/zarr/azblob.
+//
 // Zarr version 2 is read and not written. A node with no zarr.json is opened
 // from its .zarray or .zgroup and its .zattrs, as the metadata version 3
 // would give it, with ZarrFormat 2: compressors and filters are the codecs

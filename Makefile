@@ -1,6 +1,6 @@
-# Everything CI runs, runnable here. MODULES is the three modules of this
+# Everything CI runs, runnable here. MODULES is the five modules of this
 # repository; each is built, tested and linted on its own.
-MODULES := . s3 zstd
+MODULES := . s3 gcs azblob zstd
 
 GOLANGCI_VERSION := v2.13.2
 CONFIG := $(abspath .golangci.yml)
@@ -35,7 +35,7 @@ vuln:
 	    (cd $$m && go run golang.org/x/vuln/cmd/govulncheck@latest ./...) || exit 1; \
 	done
 
-## published: build and test s3 and zstd against the core their go.mod
+## published: build and test s3, gcs, azblob and zstd against the core their go.mod
 ## requires, with the replace dropped, as a consumer gets them. It fails if a
 ## sub-module requires a core that was never tagged, or uses what the tag it
 ## requires does not have: tag the core first, then require the tag.
@@ -70,7 +70,7 @@ fmt-check:
 fuzz:
 	@for t in FuzzMetadata FuzzOpenAndRead FuzzMetadataV2 FuzzOpenAndReadV2 \
 	          FuzzBytesCodec FuzzGzipCodec FuzzZlibCodec FuzzCRC32CCodec \
-	          FuzzShard FuzzShardIndex; do \
+	          FuzzShard FuzzShardIndex FuzzHTTPRange; do \
 	    echo "==> fuzz $$t"; \
 	    go test -run '^$$' -fuzz "^$$t\$$" -fuzztime $(FUZZTIME) . || exit 1; \
 	done
