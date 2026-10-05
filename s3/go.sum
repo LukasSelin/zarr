@@ -1,5 +1,5 @@
-github.com/LukasSelin/zarr v0.3.0 h1:tyoRoYzpCcv6duXxhYp9JUlIyEhFEdb3sas4qPzPPAM=
-github.com/LukasSelin/zarr v0.3.0/go.mod h1:S3qKKzi/I+oQOdIxcsTmM0jrCasDCun2XPZd08E5TGI=
+github.com/LukasSelin/zarr v0.4.0 h1:Dh6T9NXYrHD6PqeienqWGNb+g/WYUK1L4LwocDFQDrU=
+github.com/LukasSelin/zarr v0.4.0/go.mod h1:00D4r5ghxgLk30xXw3ajemyAvXN9+KjQDqUAiAX/h3c=
 github.com/aws/aws-sdk-go-v2 v1.47.1 h1:uOIZnp4PK3ZhKI0dNrJrhTEsLxbpXHTAJlwoS1pvAtw=
 github.com/aws/aws-sdk-go-v2 v1.47.1/go.mod h1:bttEH6JqnUL8LepvDVfdrds/fZ5bCIxzpe3abyUrhDU=
 github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.20 h1:GPRlPwz40I2B2VrBEASOA3Bi77NyeqejNLkifosX0rs=
