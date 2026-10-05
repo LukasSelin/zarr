@@ -166,6 +166,26 @@ module needs Go 1.25, as `cloud.google.com/go/storage` does; v1.69 and
 later ask for 1.26, so it is held at v1.68 while this repository builds with
 1.25.
 
+## Stores in Azure Blob Storage
+
+`github.com/LukasSelin/zarr/azblob` is a module of its own, over
+`github.com/Azure/azure-sdk-for-go/sdk/storage/azblob`, and a store of the
+blobs in one container:
+
+```go
+c, _ := container.NewClient("https://account.blob.core.windows.net/fwi", cred, nil)
+s := azblob.New(c, "fwi.zarr")
+```
+
+It is a `DirLister`, listing one level with the delimiter `/`, and a
+`RangeGetter`; but Blob Storage has no range for the last bytes of a blob,
+so the index at the end of a shard costs a read of the blob's properties
+and then of the range, asked for on condition that the blob is still the
+one the properties were of. A chunk in a shard is one request. A
+`BlobNotFound` is `ErrNotFound`; a `ContainerNotFound` is an error. A
+`Delete` takes a blob's snapshots with it, as Blob Storage will not delete
+one without them. The module needs Go 1.25, as the SDK does.
+
 ## Stores over HTTP
 
 `zarr.NewHTTPStore` reads a hierarchy published as static files - a web
@@ -335,8 +355,8 @@ Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 
 ## Checks
 
-`make check` runs what CI runs, over all four modules - the root, `s3`,
-`gcs` and `zstd` - and `make tools` installs the two that are not in the toolchain:
+`make check` runs what CI runs, over all five modules - the root, `s3`,
+`gcs`, `azblob` and `zstd` - and `make tools` installs the two that are not in the toolchain:
 
 | Check | What it is for |
 |---|---|
@@ -346,9 +366,9 @@ Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 | `make vuln` | govulncheck, against the modules and the standard library |
 | `make fuzz` | each fuzz target for `FUZZTIME`, 30s by default |
 | `make tidy` | `go mod tidy` in each module |
-| `make published` | `s3`, `gcs` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
+| `make published` | `s3`, `gcs`, `azblob` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
 
-`gcs` and `zstd` keep a `replace` of the core with the directory above them,
+`gcs`, `azblob` and `zstd` keep a `replace` of the core with the directory above them,
 so that their tests run against the core beside them; `s3` has none, and
 its tests run against the tag it requires. Go ignores a
 `replace` in a dependency, so what a consumer gets is the core their
@@ -358,7 +378,7 @@ fail if that is not a tag, or is a tag without what the sub-module uses.
 ## Releasing
 
 The core is tagged `vX.Y.Z` and each sub-module `s3/vX.Y.Z`,
-`gcs/vX.Y.Z` or `zstd/vX.Y.Z`. Tag the core first; then raise the sub-modules' `require` of
+`gcs/vX.Y.Z`, `azblob/vX.Y.Z` or `zstd/vX.Y.Z`. Tag the core first; then raise the sub-modules' `require` of
 the core to that tag, if they need it, and commit; then tag the
 sub-modules on that commit. `make published` passes only once the core tag
 they require exists.
