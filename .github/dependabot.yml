@@ -7,6 +7,7 @@ updates:
     directories:
       - "/"
       - "/s3"
+      - "/gcs"
       - "/zstd"
     schedule:
       interval: weekly
@@ -16,6 +17,10 @@ updates:
       aws-sdk:
         patterns:
           - "github.com/aws/*"
+      google-cloud:
+        patterns:
+          - "cloud.google.com/*"
+          - "google.golang.org/*"
 
   - package-ecosystem: github-actions
     directory: "/"

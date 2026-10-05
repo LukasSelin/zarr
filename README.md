@@ -142,6 +142,30 @@ the SDK asked for 1.24, until govulncheck found GO-2026-5764 in the
 eventstream protocol under it: the fix is service/s3 v1.97.3, which asks
 for 1.24, so that is what the module builds with now.
 
+## Stores in Google Cloud Storage
+
+`github.com/LukasSelin/zarr/gcs` is a module of its own, over
+`cloud.google.com/go/storage`. It is what the S3 store is: a `RangeGetter`,
+a shard's index at its end being one request, and a `DirLister`, listing
+one level with the delimiter `/`.
+
+```go
+c, _ := storage.NewClient(ctx)
+s := gcs.New(c.Bucket("my-bucket"), "fwi.zarr")
+```
+
+A key that is not there is `storage.ErrObjectNotExist`, which is
+`ErrNotFound`. GCS answers a read in a bucket that is not there the same
+way, so opening a node in a misspelt bucket is `ErrNotFound`; a listing says
+the bucket is missing. The client retries an upload only if told it is
+idempotent, which a `Set` is: give the handle
+`Retryer(storage.WithPolicy(storage.RetryAlways))` to have one retried. An
+object stored with `Content-Encoding: gzip` is served whole whatever range
+is asked for, so a range of it is an error: store shards without it. The
+module needs Go 1.25, as `cloud.google.com/go/storage` does; v1.69 and
+later ask for 1.26, so it is held at v1.68 while this repository builds with
+1.25.
+
 ## Stores over HTTP
 
 `zarr.NewHTTPStore` reads a hierarchy published as static files - a web
@@ -311,8 +335,8 @@ Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 
 ## Checks
 
-`make check` runs what CI runs, over all three modules - the root, `s3` and
-`zstd` - and `make tools` installs the two that are not in the toolchain:
+`make check` runs what CI runs, over all four modules - the root, `s3`,
+`gcs` and `zstd` - and `make tools` installs the two that are not in the toolchain:
 
 | Check | What it is for |
 |---|---|
@@ -322,18 +346,19 @@ Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 | `make vuln` | govulncheck, against the modules and the standard library |
 | `make fuzz` | each fuzz target for `FUZZTIME`, 30s by default |
 | `make tidy` | `go mod tidy` in each module |
-| `make published` | `s3` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
+| `make published` | `s3`, `gcs` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
 
-`s3` and `zstd` keep a `replace` of the core with the directory above them,
-so that their tests run against the core beside them. Go ignores a
+`gcs` and `zstd` keep a `replace` of the core with the directory above them,
+so that their tests run against the core beside them; `s3` has none, and
+its tests run against the tag it requires. Go ignores a
 `replace` in a dependency, so what a consumer gets is the core their
 `require` names; `make published`, and the CI job of the same purpose,
 fail if that is not a tag, or is a tag without what the sub-module uses.
 
 ## Releasing
 
-The core is tagged `vX.Y.Z` and each sub-module `s3/vX.Y.Z` or
-`zstd/vX.Y.Z`. Tag the core first; then raise the sub-modules' `require` of
+The core is tagged `vX.Y.Z` and each sub-module `s3/vX.Y.Z`,
+`gcs/vX.Y.Z` or `zstd/vX.Y.Z`. Tag the core first; then raise the sub-modules' `require` of
 the core to that tag, if they need it, and commit; then tag the
 sub-modules on that commit. `make published` passes only once the core tag
 they require exists.
