@@ -69,7 +69,7 @@ fmt-check:
 ## fuzz: run each fuzz target for FUZZTIME (default 30s)
 fuzz:
 	@for t in FuzzMetadata FuzzOpenAndRead FuzzBytesCodec FuzzGzipCodec \
-	          FuzzCRC32CCodec FuzzShard FuzzShardIndex; do \
+	          FuzzCRC32CCodec FuzzShard FuzzShardIndex FuzzHTTPRange; do \
 	    echo "==> fuzz $$t"; \
 	    go test -run '^$$' -fuzz "^$$t\$$" -fuzztime $(FUZZTIME) . || exit 1; \
 	done

@@ -142,6 +142,39 @@ the SDK asked for 1.24, until govulncheck found GO-2026-5764 in the
 eventstream protocol under it: the fix is service/s3 v1.97.3, which asks
 for 1.24, so that is what the module builds with now.
 
+## Stores over HTTP
+
+`zarr.NewHTTPStore` reads a hierarchy published as static files - a web
+server, a CDN, the public endpoint of a bucket - with nothing but
+`net/http`. It is read only: `Set` and `Delete` return `ErrReadOnly`, so
+`Write`, `CreateArray` and `Delete` do too.
+
+```go
+s, err := zarr.NewHTTPStore("https://example.com/fwi.zarr", nil) // or an *http.Client
+a, err := zarr.OpenArray(ctx, s, "isi")
+```
+
+The key `isi/c/0/0` is a GET of `https://example.com/fwi.zarr/isi/c/0/0`,
+each segment escaped; a query in the base URL, such as a signature, goes
+with every request. A server that wants headers gets them from the
+client's `Transport`. Plain HTTP cannot list, so `List` is an error
+wrapping `errors.ErrUnsupported`, and so are `ListDir`, `Group.Children`
+and `Delete`: open the arrays of a group by name.
+
+It is a `RangeGetter`. A range must come back a 206 whose `Content-Range`
+is the range asked for, of that many bytes; a 416 is a range outside the
+value. A server that ignores `Range` answers 200 with the whole value, and
+the range is cut out of it rather than trusted: right, but each range
+costs a read of the value up to its end. Serve shards from one that
+honours `Range`.
+
+404 and 410 are a key that is not there, which reads as fill. 403 is an
+error, saying why, unless `ForbiddenIsNotFound` is set: some hosts, the
+public endpoint of a bucket that may not be listed among them, answer 403
+for a key that is not there, and with it set a chunk the server forbids
+reads as fill. `MaxObjectBytes`, 4 GiB unless set, is the most one value
+is read to, so a server cannot make a read allocate without bound.
+
 ## zstd
 
 zstd is not in the standard library, so its codec is a module of its own,
@@ -242,9 +275,10 @@ clear of the index and of every other chunk. A region read is made whole
 in memory, so look at the shape of an array from a stranger before reading
 all of it.
 
-The fuzz tests hold this: metadata, each codec, a shard and its index, and
-an array opened and read from a store of fuzzed keys, none of which may
-panic or allocate past a bound. `go test` runs their seeds and
+The fuzz tests hold this: metadata, each codec, a shard and its index, an
+array opened and read from a store of fuzzed keys, and a range read from a
+server that answers as it likes, none of which may panic or allocate past
+a bound. `go test` runs their seeds and
 `testdata/fuzz`; to fuzz one:
 
 ```sh

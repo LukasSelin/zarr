@@ -110,6 +110,10 @@ var (
 	// ErrNotFound is what a Store returns for a key it does not hold, and
 	// what opening a node that is not there wraps.
 	ErrNotFound = errors.New("zarr: not found")
+	// ErrReadOnly is what a Store that cannot be written, such as an
+	// HTTPStore, returns from Set and Delete, and so what writing, creating
+	// and deleting through one wrap.
+	ErrReadOnly = errors.New("zarr: read only")
 	// ErrExists is what creating a node over one already there wraps.
 	ErrExists = errors.New("zarr: already exists")
 	// ErrUnsupported is what opening metadata this package cannot honour

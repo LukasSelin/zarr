@@ -152,6 +152,8 @@ jobs:
             target: FuzzShard
           - module: "."
             target: FuzzShardIndex
+          - module: "."
+            target: FuzzHTTPRange
           - module: "zstd"
             target: FuzzDecode
     steps:
