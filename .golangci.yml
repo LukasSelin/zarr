@@ -1,5 +1,5 @@
-# Shared by every module here: the root, s3 and zstd. Run it from a module's
-# own directory, or use `make lint`, which walks all three.
+# Shared by every module here: the root, s3, gcs and zstd. Run it from a module's
+# own directory, or use `make lint`, which walks them all.
 version: "2"
 
 run:

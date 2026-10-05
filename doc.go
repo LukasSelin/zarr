@@ -27,7 +27,8 @@
 // with Range requests for the parts of a shard. It is read only, and cannot
 // list: Set and Delete return an error wrapping ErrReadOnly, and List one
 // wrapping errors.ErrUnsupported. A store in S3, which can be written and
-// listed, is in the module github.com/LukasSelin/zarr/s3.
+// listed, is in the module github.com/LukasSelin/zarr/s3, and one in Google
+// Cloud Storage in github.com/LukasSelin/zarr/gcs.
 //
 // Zarr version 2 is not read: opening a node that has a .zarray, .zgroup or
 // .zattrs and no zarr.json is an error wrapping ErrZarrV2.
