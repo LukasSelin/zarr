@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -299,16 +300,47 @@ func TestAReadThatFailsStopsTheChunksBesideIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	chunks := product(a.NumChunks())
-	// The first chunk in C order fails, so what the store is asked for after
-	// it is what the cancellation did not stop.
-	f := &failingGet{Store: m, substring: "c/0/0", err: broken}
+	// The first chunk in C order fails, and every other chunk waits for the
+	// read to be cancelled, so that the chunks beside the failing one cannot
+	// all be read before it is: each worker reads one chunk at most, and the
+	// read is over only if the failure cancelled it.
+	f := &waitingGet{failingGet: failingGet{Store: m, substring: "c/0/0", err: broken}}
 	b := mustOpen(t, f, "height")
 	b.Concurrency = 4
+	f.mu.Lock()
+	f.reads = 0
+	f.mu.Unlock()
 	if _, err := Read[int32](ctx, b, nil, nil); !errors.Is(err, broken) {
 		t.Fatalf("read failed with %v", err)
 	}
-	if f.reads > chunks/2 {
+	if f.reads > b.Concurrency {
 		t.Errorf("read %d of %d chunks after the first of them failed", f.reads, chunks)
+	}
+	if f.stuck.Load() {
+		t.Error("the chunks beside the one that failed were not cancelled")
+	}
+}
+
+// waitingGet is a failingGet whose reads that do not fail wait for their ctx
+// to be done, and give up after a while, and say so, if it never is.
+type waitingGet struct {
+	failingGet
+	stuck atomic.Bool
+}
+
+func (s *waitingGet) Get(ctx context.Context, key string) ([]byte, error) {
+	if err := s.read(key); err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(key, "zarr.json") {
+		return s.Store.Get(ctx, key)
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		s.stuck.Store(true)
+		return nil, fmt.Errorf("%s: the read was not cancelled", key)
 	}
 }
 

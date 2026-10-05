@@ -52,6 +52,8 @@ func encodedBound(c ArrayBytesCodec, spec ChunkSpec) int64 {
 			return unbounded
 		}
 		return n
+	case fortranBytes:
+		return encodedBound(c.BytesCodec, spec)
 	case *ShardingCodec:
 		if c.prepare() != nil {
 			return unbounded

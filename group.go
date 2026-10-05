@@ -33,10 +33,15 @@ func CreateGroup(ctx context.Context, s Store, path string, attrs map[string]any
 	return &Group{store: s, path: path, meta: m}, nil
 }
 
-// OpenGroup opens the group at path.
+// OpenGroup opens the group at path: its zarr.json, or, if it has none, the
+// .zgroup and .zattrs of Zarr version 2, which is read and not written.
 func OpenGroup(ctx context.Context, s Store, path string) (*Group, error) {
 	g := &Group{store: s, path: path}
-	if err := readMetadata(ctx, s, path, "group", groupKeys, &g.meta); err != nil {
+	err := readMetadata(ctx, s, path, "group", groupKeys, &g.meta)
+	if errors.Is(err, ErrNotFound) {
+		return openGroupV2(ctx, s, path, err)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -52,6 +57,9 @@ func (g *Group) Attribute(name string, v any) (bool, error) {
 // SetAttributes lays attrs over the group's attributes and writes its
 // metadata again.
 func (g *Group) SetAttributes(ctx context.Context, attrs map[string]any) error {
+	if err := g.writable(); err != nil {
+		return err
+	}
 	merged, err := withAttributes(g.meta.Attributes, attrs)
 	if err != nil {
 		return err
@@ -65,8 +73,15 @@ func (g *Group) SetAttributes(ctx context.Context, attrs map[string]any) error {
 	return nil
 }
 
+// writable refuses a write to a group of Zarr version 2, and the creation of
+// a node in one.
+func (g *Group) writable() error { return readOnly(g.meta.ZarrFormat, "group", g.path) }
+
 // CreateArray creates an array called name in the group.
 func (g *Group) CreateArray(ctx context.Context, name string, o ArrayOptions) (*Array, error) {
+	if err := g.writable(); err != nil {
+		return nil, err
+	}
 	return CreateArray(ctx, g.store, join(g.path, name), o)
 }
 
@@ -77,6 +92,9 @@ func (g *Group) OpenArray(ctx context.Context, name string) (*Array, error) {
 
 // CreateGroup creates a group called name in the group.
 func (g *Group) CreateGroup(ctx context.Context, name string, attrs map[string]any) (*Group, error) {
+	if err := g.writable(); err != nil {
+		return nil, err
+	}
 	return CreateGroup(ctx, g.store, join(g.path, name), attrs)
 }
 
@@ -101,7 +119,9 @@ type Child struct {
 // array, or a directory a delete left empty - is not a child. The reads go
 // as many at once as the chunks of an array that says nothing about its
 // concurrency, so that over a network a thousand children take the time of
-// some sixty round trips rather than of a thousand.
+// some sixty round trips rather than of a thousand. The children of a group
+// of Zarr version 2 are of version 2: a name's .zarray is read, and its
+// .zgroup if it has none.
 func (g *Group) Children(ctx context.Context) ([]Child, error) {
 	found, err := g.children(ctx)
 	if err != nil || len(found) == 0 {
@@ -116,7 +136,8 @@ func (g *Group) Children(ctx context.Context) ([]Child, error) {
 
 // OpenArrays opens every array directly in the group, sorted by name, from
 // the metadata Children reads: a listing and a read for each child, rather
-// than the read again that OpenArray of each child would make. Groups, and
+// than the read again that OpenArray of each child would make, and in a
+// group of Zarr version 2 a read of each array's .zattrs. Groups, and
 // children whose metadata this package cannot read, are left out; an array
 // that does not open is an error, as it is from OpenArray.
 func (g *Group) OpenArrays(ctx context.Context) ([]*Array, error) {
@@ -136,8 +157,16 @@ func (g *Group) OpenArrays(ctx context.Context) ([]*Array, error) {
 	// Parsing is most of what is left, so it goes as many at once too.
 	arrays := make([]*Array, len(named))
 	err = eachSpan(ctx, min(defaultConcurrency, len(named)), []int{0}, []int{len(named) - 1},
-		func(_ context.Context, n int, _ []int) error {
+		func(ctx context.Context, n int, _ []int) error {
 			path := join(g.path, named[n].Name)
+			if g.meta.ZarrFormat == 2 {
+				attrs, err := readAttributesV2(ctx, g.store, path)
+				if err != nil {
+					return err
+				}
+				arrays[n], err = newArrayV2(g.store, path, named[n].meta, attrs)
+				return err
+			}
 			var m ArrayMetadata
 			if err := parseMetadata(named[n].meta, path, "array", arrayKeys, &m); err != nil {
 				return err
@@ -185,6 +214,13 @@ func (g *Group) children(ctx context.Context) ([]child, error) {
 	found := make([]child, len(names))
 	err = eachSpan(ctx, min(defaultConcurrency, len(names)), []int{0}, []int{len(names) - 1},
 		func(ctx context.Context, n int, _ []int) error {
+			if g.meta.ZarrFormat == 2 {
+				typ, b, err := v2Child(ctx, g.store, join(g.path, names[n]))
+				if typ != "" {
+					found[n] = child{Child{Name: names[n], Type: typ}, b}
+				}
+				return err
+			}
 			b, err := g.store.Get(ctx, metadataKey(join(g.path, names[n])))
 			if errors.Is(err, ErrNotFound) {
 				return nil

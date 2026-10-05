@@ -1,0 +1,11 @@
+{
+  "zarr_format": 2,
+  "shape": [5],
+  "chunks": [2],
+  "dtype": "|b1",
+  "fill_value": true,
+  "order": "C",
+  "filters": null,
+  "compressor": null,
+  "dimension_separator": "."
+}

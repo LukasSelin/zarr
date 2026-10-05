@@ -30,8 +30,12 @@
 // listed, is in the module github.com/LukasSelin/zarr/s3, and one in Google
 // Cloud Storage in github.com/LukasSelin/zarr/gcs.
 //
-// Zarr version 2 is not read: opening a node that has a .zarray, .zgroup or
-// .zattrs and no zarr.json is an error wrapping ErrZarrV2.
+// Zarr version 2 is read and not written. A node with no zarr.json is opened
+// from its .zarray or .zgroup and its .zattrs, as the metadata version 3
+// would give it, with ZarrFormat 2: compressors and filters are the codecs
+// registered as numcodecs.<id> - zlib, gzip and shuffle here, and zstd from
+// the zstd module - and xarray's _ARRAY_DIMENSIONS attribute is the
+// dimension names. A write to one is an error wrapping ErrZarrV2.
 //
 // Arrays are read and written with the generic functions Read, Write,
 // ReadChunk and WriteChunk, whose element type must be the array's data

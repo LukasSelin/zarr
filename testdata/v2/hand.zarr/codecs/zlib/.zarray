@@ -1,0 +1,11 @@
+{
+  "zarr_format": 2,
+  "shape": [4,5],
+  "chunks": [2,3],
+  "dtype": "<f8",
+  "fill_value": "NaN",
+  "order": "C",
+  "filters": null,
+  "compressor": {"id": "zlib", "level": 5},
+  "dimension_separator": "."
+}

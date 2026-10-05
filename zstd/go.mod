@@ -5,7 +5,7 @@ go 1.25
 toolchain go1.25.13
 
 require (
-	github.com/LukasSelin/zarr v0.3.0
+	github.com/LukasSelin/zarr v0.4.0
 	github.com/klauspost/compress v1.20.1
 )
 

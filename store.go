@@ -119,9 +119,10 @@ var (
 	// ErrUnsupported is what opening metadata this package cannot honour
 	// wraps: an unknown codec, data type or extension it must understand.
 	ErrUnsupported = errors.New("zarr: unsupported")
-	// ErrZarrV2 is what opening a node written in Zarr version 2 wraps: one
-	// with a .zarray, .zgroup or .zattrs where its zarr.json would be. It
-	// wraps ErrUnsupported, as this package reads version 3 alone.
+	// ErrZarrV2 is what a write to a node of Zarr version 2 wraps, which
+	// this package reads and does not write: Write, WriteChunk, Resize,
+	// Append and SetAttributes, and creating a node in a version 2 group. It
+	// wraps ErrUnsupported.
 	ErrZarrV2 = fmt.Errorf("%w: Zarr version 2", ErrUnsupported)
 )
 
@@ -303,11 +304,13 @@ func (s *MemoryStore) Keys() []string {
 // DirStore is a Store kept as files under a directory, one file a key.
 //
 // A Set writes to a file beside the key's and renames it into place, so List
-// and ListDir pass over every name beginning with a dot: a key whose last
-// segment begins with one is written and read but never listed. Nothing this
-// package writes is named that way. Deleting a key removes its file and not
-// the directories above it, so the directories of a node that was deleted
-// stay behind, empty; List does not yield one, a directory not being a key.
+// and ListDir pass over every name beginning with a dot but the metadata of
+// Zarr version 2 - .zarray, .zgroup, .zattrs and .zmetadata, whose files in
+// the writing begin with two: any other key whose last segment begins with
+// one is written and read but never listed. Nothing this package writes is
+// named that way. Deleting a key removes its file and not the directories
+// above it, so the directories of a node that was deleted stay behind,
+// empty; List does not yield one, a directory not being a key.
 type DirStore struct {
 	root string
 }
@@ -455,7 +458,7 @@ func (s *DirStore) List(ctx context.Context, prefix string, fn func(key string) 
 		if p == root {
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), ".") || filepath.Dir(p) == root && !strings.HasPrefix(d.Name(), base) {
+		if hidden(d.Name(), d.IsDir()) || filepath.Dir(p) == root && !strings.HasPrefix(d.Name(), base) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}
@@ -487,6 +490,20 @@ func (s *DirStore) List(ctx context.Context, prefix string, fn func(key string) 
 	return err
 }
 
+// hidden says whether a DirStore passes over a file or directory of the name
+// when it lists: whether it begins with a dot, and is not a file of the
+// metadata of Zarr version 2.
+func hidden(name string, dir bool) bool {
+	if !strings.HasPrefix(name, ".") {
+		return false
+	}
+	switch name {
+	case ".zarray", ".zgroup", ".zattrs", ".zmetadata":
+		return dir
+	}
+	return true
+}
+
 // ListDir reads the prefix's directory rather than walking it. A directory
 // a delete left empty is a name here, as the file system keeps it, where a
 // store in S3 would have none to give.
@@ -507,7 +524,7 @@ func (s *DirStore) ListDir(ctx context.Context, prefix string, fn func(name stri
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") || !strings.HasPrefix(name, base) {
+		if hidden(name, e.IsDir()) || !strings.HasPrefix(name, base) {
 			continue
 		}
 		if checkKey(join(dir, name)) != nil {

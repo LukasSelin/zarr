@@ -11,5 +11,17 @@
   {"name": "float64_shuffle", "dtype": "float64", "shape": [6, 8], "chunks": [3, 4], "fill": 0, "endian": "little", "compressors": ["shuffle", "gzip"], "separator": "/"},
   {"name": "sharded_float32", "dtype": "float32", "shape": [37, 50], "chunks": [4, 5], "fill": "NaN", "endian": "little", "compressors": ["gzip"], "separator": "/", "sharding": {"shape": [16, 20], "index_location": "end"}, "dimension_names": ["y", "x"]},
   {"name": "sharded_index_first", "dtype": "int32", "shape": [9, 9, 4], "chunks": [3, 3, 2], "fill": -5, "endian": "big", "compressors": [], "separator": "/", "sharding": {"shape": [6, 9, 4], "index_location": "start"}},
-  {"name": "sharded_then_gzip", "dtype": "uint16", "shape": [30], "chunks": [3], "fill": 0, "endian": "little", "compressors": ["crc32c"], "separator": ".", "sharding": {"shape": [12], "index_location": "end", "after": ["gzip"]}}
+  {"name": "sharded_then_gzip", "dtype": "uint16", "shape": [30], "chunks": [3], "fill": 0, "endian": "little", "compressors": ["crc32c"], "separator": ".", "sharding": {"shape": [12], "index_location": "end", "after": ["gzip"]}},
+  {"name": "v2/int16_zlib", "zarr_format": 2, "dtype": "int16", "shape": [7, 5], "chunks": [3, 2], "fill": -1, "endian": "little", "compressors": ["zlib"], "separator": ".", "dimension_names": ["y", "x"]},
+  {"name": "v2/float32_big_gzip", "zarr_format": 2, "dtype": "float32", "shape": [9, 10], "chunks": [4, 4], "fill": "NaN", "endian": "big", "compressors": ["gzip"], "separator": "/"},
+  {"name": "v2/float64_shuffle_zlib", "zarr_format": 2, "dtype": "float64", "shape": [6, 8], "chunks": [3, 4], "fill": "-Infinity", "endian": "little", "compressors": ["shuffle", "zlib"], "separator": "."},
+  {"name": "v2/int32_big_shuffle_gzip", "zarr_format": 2, "dtype": "int32", "shape": [10], "chunks": [3], "fill": -5, "endian": "big", "compressors": ["shuffle", "gzip"], "separator": "/"},
+  {"name": "v2/uint64_fortran", "zarr_format": 2, "dtype": "uint64", "shape": [5, 4, 3], "chunks": [2, 3, 2], "fill": 7, "endian": "big", "compressors": ["zlib"], "separator": ".", "order": "F"},
+  {"name": "v2/uint32_fortran_slash", "zarr_format": 2, "dtype": "uint32", "shape": [4, 6], "chunks": [3, 4], "fill": 1, "endian": "little", "compressors": [], "separator": "/", "order": "F"},
+  {"name": "v2/int64_gzip", "zarr_format": 2, "dtype": "int64", "shape": [4, 4], "chunks": [4, 3], "fill": 0, "endian": "little", "compressors": ["gzip"], "separator": "."},
+  {"name": "v2/uint16_big", "zarr_format": 2, "dtype": "uint16", "shape": [30], "chunks": [7], "fill": 0, "endian": "big", "compressors": [], "separator": "."},
+  {"name": "v2/bool", "zarr_format": 2, "dtype": "bool", "shape": [4, 4], "chunks": [3, 3], "fill": false, "endian": null, "compressors": ["zlib"], "separator": "/"},
+  {"name": "v2/uint8_plain", "zarr_format": 2, "dtype": "uint8", "shape": [3, 130], "chunks": [2, 64], "fill": 255, "endian": null, "compressors": [], "separator": "."},
+  {"name": "v2/int8_scalar", "zarr_format": 2, "dtype": "int8", "shape": [], "chunks": [], "fill": 0, "endian": null, "compressors": [], "separator": "."},
+  {"name": "v2/nested/float32_inf", "zarr_format": 2, "dtype": "float32", "shape": [5, 5], "chunks": [2, 2], "fill": "Infinity", "endian": "little", "compressors": ["shuffle", "zlib"], "separator": ".", "dimension_names": ["lat", "lon"]}
 ]
