@@ -100,7 +100,11 @@ func (n *Named) decode(b []byte) bool {
 	return true
 }
 
-// ArrayMetadata is the zarr.json of an array.
+// ArrayMetadata is the zarr.json of an array. That of an array of Zarr
+// version 2 is its .zarray and .zattrs as version 3 would have them, with
+// ZarrFormat 2: its compressor and filters are codecs after bytes, an order
+// of "F" is a transpose before it, and its dimension names are xarray's
+// _ARRAY_DIMENSIONS attribute, where that names each dimension.
 type ArrayMetadata struct {
 	ZarrFormat          int                        `json:"zarr_format"`
 	NodeType            string                     `json:"node_type"`
@@ -115,7 +119,8 @@ type ArrayMetadata struct {
 	DimensionNames      []*string                  `json:"dimension_names,omitempty"`
 }
 
-// GroupMetadata is the zarr.json of a group.
+// GroupMetadata is the zarr.json of a group, or the .zgroup and .zattrs of
+// one of Zarr version 2, with ZarrFormat 2.
 type GroupMetadata struct {
 	ZarrFormat int                        `json:"zarr_format"`
 	NodeType   string                     `json:"node_type"`
@@ -156,11 +161,6 @@ func readMetadata(ctx context.Context, s Store, path, node string, known map[str
 		return err
 	}
 	b, err := s.Get(ctx, metadataKey(path))
-	if errors.Is(err, ErrNotFound) {
-		if key := v2Metadata(ctx, s, path); key != "" {
-			return fmt.Errorf("%w: %q is a Zarr version 2 node, with %s and no zarr.json; only version 3 is supported", ErrZarrV2, path, key)
-		}
-	}
 	if err != nil {
 		return err
 	}
@@ -466,17 +466,6 @@ func decodeMetadataSlowly(b []byte, path, node string, known map[string]bool, v 
 		return fmt.Errorf("zarr: metadata of %q: %w", path, err)
 	}
 	return nil
-}
-
-// v2Metadata is the key of the Zarr version 2 metadata at path, or "" if
-// there is none, or it could not be read to tell.
-func v2Metadata(ctx context.Context, s Store, path string) string {
-	for _, name := range []string{".zarray", ".zgroup", ".zattrs"} {
-		if _, err := s.Get(ctx, join(path, name)); err == nil {
-			return join(path, name)
-		}
-	}
-	return ""
 }
 
 func writeMetadata(ctx context.Context, s Store, path string, v any) error {

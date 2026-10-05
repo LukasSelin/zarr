@@ -126,16 +126,27 @@ func CreateArray(ctx context.Context, s Store, path string, o ArrayOptions) (*Ar
 	return a, nil
 }
 
-// OpenArray opens the array at path.
+// OpenArray opens the array at path: its zarr.json, or, if it has none, the
+// .zarray and .zattrs of Zarr version 2, which is read and not written.
 func OpenArray(ctx context.Context, s Store, path string) (*Array, error) {
 	var m ArrayMetadata
-	if err := readMetadata(ctx, s, path, "array", arrayKeys, &m); err != nil {
+	err := readMetadata(ctx, s, path, "array", arrayKeys, &m)
+	if errors.Is(err, ErrNotFound) {
+		return openArrayV2(ctx, s, path, err)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return newArray(s, path, m)
 }
 
 func newArray(s Store, path string, m ArrayMetadata) (*Array, error) {
+	return makeArray(s, path, m, nil)
+}
+
+// makeArray is newArray with codecs, if not nil, in place of the pipeline
+// m.Codecs names: a version 2 array's, made from its .zarray.
+func makeArray(s Store, path string, m ArrayMetadata, codecs *pipeline) (*Array, error) {
 	a := &Array{store: s, path: path, meta: m}
 	bad := func(format string, args ...any) error {
 		return fmt.Errorf("zarr: array %q: %s", path, fmt.Sprintf(format, args...))
@@ -183,7 +194,9 @@ func newArray(s Store, path string, m ArrayMetadata) (*Array, error) {
 	if a.fill, err = parseFill(m.DataType, m.FillValue); err != nil {
 		return nil, err
 	}
-	if a.codecs, err = newPipeline(m.Codecs, m.DataType); err != nil {
+	if codecs != nil {
+		a.codecs = *codecs
+	} else if a.codecs, err = newPipeline(m.Codecs, m.DataType); err != nil {
 		return nil, err
 	}
 	a.chunks, a.perShard = a.grid, slices.Repeat([]int{1}, len(a.grid))
@@ -250,6 +263,9 @@ func (a *Array) NumChunks() []int {
 // SetAttributes lays attrs over the array's attributes and writes its
 // metadata again.
 func (a *Array) SetAttributes(ctx context.Context, attrs map[string]any) error {
+	if err := a.writable(); err != nil {
+		return err
+	}
 	merged, err := withAttributes(a.meta.Attributes, attrs)
 	if err != nil {
 		return err
@@ -262,6 +278,9 @@ func (a *Array) SetAttributes(ctx context.Context, attrs map[string]any) error {
 	a.meta = m
 	return nil
 }
+
+// writable refuses a write to an array of Zarr version 2.
+func (a *Array) writable() error { return readOnly(a.meta.ZarrFormat, "array", a.path) }
 
 // ChunkKey is the store key the chunk at idx is kept under: its own, or its
 // shard's.
@@ -335,6 +354,9 @@ func ReadChunk[T Element](ctx context.Context, a *Array, idx []int) ([]T, error)
 // stored, if nothing but the sharding codec is between the shard and its
 // bytes, and decoded and encoded again otherwise.
 func WriteChunk[T Element](ctx context.Context, a *Array, idx []int, data []T) error {
+	if err := a.writable(); err != nil {
+		return err
+	}
 	if err := checkType[T](a); err != nil {
 		return err
 	}
@@ -798,6 +820,9 @@ func Read[T Element](ctx context.Context, a *Array, start, shape []int) ([]T, er
 // back under a lock of its own in this process. Nothing holds writers in
 // other processes apart; see the package documentation.
 func Write[T Element](ctx context.Context, a *Array, start, shape []int, data []T) error {
+	if err := a.writable(); err != nil {
+		return err
+	}
 	if err := checkType[T](a); err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package zarr
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"math"
@@ -21,10 +22,14 @@ import (
 //
 // zarr-python writes every case in cases.json and this package reads them,
 // then this package writes them and zarr-python reads them. interop.py says
-// how the data of each case is made.
+// how the data of each case is made. The cases of zarr_format 2 are Zarr
+// version 2, which this package reads and does not write: zarr-python writes
+// them, in the version 2 group "v2", and no more.
 
 type interopCase struct {
 	Name           string          `json:"name"`
+	ZarrFormat     int             `json:"zarr_format"`
+	Order          string          `json:"order"`
 	DataType       DataType        `json:"dtype"`
 	Shape          []int           `json:"shape"`
 	Chunks         []int           `json:"chunks"`
@@ -125,6 +130,9 @@ func checkInterop[T Element](t *testing.T, s Store, c interopCase) {
 	if !slices.Equal(a.ChunkShape(), c.Chunks) {
 		t.Errorf("%s: chunks %v", c.Name, a.ChunkShape())
 	}
+	if format := cmp.Or(c.ZarrFormat, 3); a.Metadata().ZarrFormat != format {
+		t.Errorf("%s: zarr_format %d, not %d", c.Name, a.Metadata().ZarrFormat, format)
+	}
 	if c.Sharding != nil {
 		if !slices.Equal(a.ShardShape(), c.Sharding.Shape) || a.shard.location() != c.Sharding.IndexLocation {
 			t.Errorf("%s: shards %v, index at the %s", c.Name, a.ShardShape(), a.shard.location())
@@ -224,11 +232,16 @@ func TestZarrPython(t *testing.T) {
 		if _, err := root.Attribute("seed", &seed); err != nil || seed != math.MaxUint64 {
 			t.Errorf("seed %d: %v", seed, err)
 		}
-		if _, err := OpenGroup(ctx, s, "v2"); !errors.Is(err, ErrZarrV2) {
-			t.Errorf("a version 2 group: %v, not ErrZarrV2", err)
+		v2, err := OpenGroup(ctx, s, "v2")
+		if err != nil {
+			t.Fatal(err)
 		}
-		if _, err := OpenArray(ctx, s, "v2/a"); !errors.Is(err, ErrZarrV2) {
-			t.Errorf("a version 2 array: %v, not ErrZarrV2", err)
+		var format int
+		if _, err := v2.Attribute("format", &format); err != nil || format != 2 || v2.Metadata().ZarrFormat != 2 {
+			t.Errorf("a version 2 group: format %d, zarr_format %d: %v", format, v2.Metadata().ZarrFormat, err)
+		}
+		if _, err := v2.CreateGroup(ctx, "new", nil); !errors.Is(err, ErrZarrV2) {
+			t.Errorf("created in a version 2 group: %v", err)
 		}
 		for _, c := range cases {
 			dispatch(t, c, func() { checkInterop[bool](t, s, c) }, func() { checkInterop[int8](t, s, c) },
@@ -244,7 +257,7 @@ func TestZarrPython(t *testing.T) {
 		if _, err := CreateGroup(ctx, s, "", map[string]any{"seed": uint64(math.MaxUint64), "name": "terra"}); err != nil {
 			t.Fatal(err)
 		}
-		for _, c := range cases {
+		for _, c := range version3(cases) {
 			dispatch(t, c, func() { writeInterop[bool](t, s, c) }, func() { writeInterop[int8](t, s, c) },
 				func() { writeInterop[int16](t, s, c) }, func() { writeInterop[int32](t, s, c) }, func() { writeInterop[int64](t, s, c) },
 				func() { writeInterop[uint8](t, s, c) }, func() { writeInterop[uint16](t, s, c) }, func() { writeInterop[uint32](t, s, c) },
@@ -252,6 +265,11 @@ func TestZarrPython(t *testing.T) {
 		}
 		runPython(t, py, "read", path)
 	})
+}
+
+// version3 is the cases of Zarr version 3, which this package writes.
+func version3(cases []interopCase) []interopCase {
+	return slices.DeleteFunc(cases, func(c interopCase) bool { return c.ZarrFormat == 2 })
 }
 
 // dispatch calls the one of fs for the case's data type, in the order of the

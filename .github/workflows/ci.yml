@@ -143,9 +143,15 @@ jobs:
           - module: "."
             target: FuzzOpenAndRead
           - module: "."
+            target: FuzzMetadataV2
+          - module: "."
+            target: FuzzOpenAndReadV2
+          - module: "."
             target: FuzzBytesCodec
           - module: "."
             target: FuzzGzipCodec
+          - module: "."
+            target: FuzzZlibCodec
           - module: "."
             target: FuzzCRC32CCodec
           - module: "."

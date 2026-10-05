@@ -70,6 +70,9 @@ func (a *Array) numStored() []int {
 // stops two writers resizing or appending to one array at once, and one of
 // them would lose.
 func (a *Array) Resize(ctx context.Context, shape []int) error {
+	if err := a.writable(); err != nil {
+		return err
+	}
 	b, err := a.withShape(shape)
 	if err != nil {
 		return err
@@ -169,6 +172,9 @@ func refillAs[T Element](ctx context.Context, a, b *Array, sidx []int) error {
 // Another handle on the array keeps the shape it had until Refresh, and an
 // Append through it would write over what this one appended.
 func Append[T Element](ctx context.Context, a *Array, axis int, data []T) (int, error) {
+	if err := a.writable(); err != nil {
+		return 0, err
+	}
 	if err := checkType[T](a); err != nil {
 		return 0, err
 	}

@@ -11,7 +11,8 @@ import (
 // and which reads as the fill value. Doing it again clears what was left. It
 // does not read the metadata, so a node this package cannot open goes too. A
 // path holding no node is not an error, and a node kept under one goes with
-// it: deleting a group deletes its arrays.
+// it: deleting a group deletes its arrays. The metadata of a node of Zarr
+// version 2, its .zarray or .zgroup, goes first too.
 //
 // A DirStore keeps the directories, so what was an array is an empty tree of
 // them afterwards; nothing reads them, and List does not yield them.
@@ -19,8 +20,10 @@ func Delete(ctx context.Context, s Store, path string) error {
 	if err := checkPath(path); err != nil {
 		return err
 	}
-	if err := s.Delete(ctx, metadataKey(path)); err != nil {
-		return err
+	for _, key := range [...]string{metadataKey(path), join(path, ".zarray"), join(path, ".zgroup")} {
+		if err := s.Delete(ctx, key); err != nil {
+			return err
+		}
 	}
 	prefix := path
 	if prefix != "" {
