@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
@@ -66,7 +67,7 @@ func seedStore(f *testing.F) *MemoryStore {
 	if _, err := CreateGroup(ctx, s, "", map[string]any{"seed": uint64(1<<64 - 1)}); err != nil {
 		f.Fatal(err)
 	}
-	for _, c := range interopCases(f) {
+	for _, c := range version3(interopCases(f)) {
 		dispatch(f, c, func() { writeInterop[bool](f, s, c) }, func() { writeInterop[int8](f, s, c) },
 			func() { writeInterop[int16](f, s, c) }, func() { writeInterop[int32](f, s, c) }, func() { writeInterop[int64](f, s, c) },
 			func() { writeInterop[uint8](f, s, c) }, func() { writeInterop[uint16](f, s, c) }, func() { writeInterop[uint32](f, s, c) },
@@ -354,6 +355,118 @@ func FuzzOpenAndRead(f *testing.F) {
 	})
 }
 
+// v2Seeds is every array of Zarr version 2 in testdata/v2, by its .zarray:
+// the keys under it, relative to it, the .zarray among them.
+func v2Seeds(f *testing.F) map[string]map[string][]byte {
+	out := map[string]map[string][]byte{}
+	for _, name := range []string{"store.zarr", "hand.zarr"} {
+		dir := NewDirStore(filepath.Join("testdata", "v2", name))
+		keys := map[string][]byte{}
+		err := dir.List(ctx, "", func(key string) error {
+			b, err := dir.Get(ctx, key)
+			keys[key] = b
+			return err
+		})
+		if err != nil {
+			f.Fatal(err)
+		}
+		for key := range keys {
+			path, ok := strings.CutSuffix(key, ".zarray")
+			if !ok {
+				continue
+			}
+			array := map[string][]byte{}
+			for k, v := range keys {
+				if rel, ok := strings.CutPrefix(k, path); ok && !strings.Contains(rel, "/.z") {
+					array[rel] = v
+				}
+			}
+			out[name+"/"+key] = array
+		}
+	}
+	return out
+}
+
+func FuzzMetadataV2(f *testing.F) {
+	smallChunks(f)
+	for _, keys := range v2Seeds(f) {
+		f.Add(keys[".zarray"], keys[".zattrs"])
+	}
+	f.Add([]byte(`{"zarr_format": 2, "shape": [10000, 1000], "chunks": [1000, 100], "dtype": ">f8", "fill_value": "NaN",
+  "order": "F", "filters": [{"id": "shuffle", "elementsize": 8}], "compressor": {"id": "zlib", "level": 1},
+  "dimension_separator": "/"}`), []byte(`{"_ARRAY_DIMENSIONS": ["y", "x"], "seed": 18446744073709551615}`))
+	f.Add([]byte(`{"zarr_format": 2, "shape": [], "chunks": [], "dtype": "|b1", "fill_value": null, "compressor": {"id": "gzip", "level": 9}}`), []byte(`null`))
+	f.Add([]byte(`{"zarr_format": 2, "shape": [3], "chunks": [2], "dtype": "<u8", "fill_value": 1e19, "compressor": {"id": "blosc"}}`), []byte(`[]`))
+	f.Fuzz(func(t *testing.T, zarray, zattrs []byte) {
+		s := NewMemoryStore()
+		s.Set(ctx, ".zarray", zarray)
+		s.Set(ctx, ".zgroup", zarray)
+		s.Set(ctx, ".zattrs", zattrs)
+		checkAllocated(t, len(zarray)+len(zattrs), func() {
+			if g, err := OpenGroup(ctx, s, ""); err == nil {
+				var v any
+				g.Attribute("seed", &v)
+			}
+			a, err := OpenArray(ctx, s, "")
+			if err != nil {
+				return
+			}
+			// What opened is what version 3 would have, and opens as that
+			// but for a transpose, which version 3 does not have here.
+			m := a.Metadata()
+			if m.ZarrFormat != 2 {
+				t.Fatalf("zarr_format %d", m.ZarrFormat)
+			}
+			if m.Codecs[0].Name != "transpose" {
+				m.ZarrFormat = 3
+				again := NewMemoryStore()
+				if err := writeMetadata(ctx, again, "", m); err != nil {
+					t.Fatalf("metadata that opened does not write: %v", err)
+				}
+				if _, err := OpenArray(ctx, again, ""); err != nil {
+					t.Fatalf("version 2 metadata that opened does not open as version 3: %v\n%s", err, must(again.Get(ctx, "zarr.json")))
+				}
+			}
+			a.NumChunks()
+			readSome(t, a, 0)
+		})
+	})
+}
+
+func FuzzOpenAndReadV2(f *testing.F) {
+	smallChunks(f)
+	someConcurrency(f)
+	for _, keys := range v2Seeds(f) {
+		var names []string
+		for k := range keys {
+			if k != ".zarray" {
+				names = append(names, k)
+			}
+		}
+		slices.Sort(names)
+		for i, k := range names {
+			next := names[(i+1)%len(names)]
+			f.Add(keys[".zarray"], k, keys[k], next, keys[next], uint64(i*7))
+		}
+		if len(names) == 0 {
+			f.Add(keys[".zarray"], "0", []byte{}, ".zattrs", []byte("{}"), uint64(0))
+		}
+	}
+	f.Fuzz(func(t *testing.T, zarray []byte, k1 string, v1 []byte, k2 string, v2 []byte, at uint64) {
+		s := NewMemoryStore()
+		s.Set(ctx, ".zarray", zarray)
+		s.Set(ctx, k1, v1)
+		s.Set(ctx, k2, v2)
+		checkAllocated(t, len(zarray)+len(v1)+len(v2), func() {
+			a, err := OpenArray(ctx, s, "")
+			if err != nil {
+				return
+			}
+			readSome(t, a, at)
+		})
+	})
+}
+
 var fuzzTypes = []DataType{Bool, Int8, Int16, Int32, Int64, Uint8, Uint16, Uint32, Uint64, Float32, Float64}
 
 func FuzzBytesCodec(f *testing.F) {
@@ -426,6 +539,28 @@ func FuzzGzipCodec(f *testing.F) {
 				t.Fatalf("inflated to %d bytes, past a limit of %d", len(out), l)
 			}
 			if out, err := (GzipCodec{}).DecodeBytes(data); err == nil && int64(len(out)) > maxStoredBytes {
+				t.Fatalf("inflated to %d bytes, past a chunk", len(out))
+			}
+		})
+	})
+}
+
+func FuzzZlibCodec(f *testing.F) {
+	smallChunks(f)
+	for _, level := range []int{0, 1, 5, 9} {
+		f.Add(must(ZlibCodec{Level: level}.EncodeBytes(bytes.Repeat([]byte("zarr"), 1000))), uint32(4000))
+		f.Add(must(ZlibCodec{Level: level}.EncodeBytes(nil)), uint32(0))
+	}
+	// A bomb: a megabyte of zeros in a thousand bytes.
+	f.Add(must(ZlibCodec{Level: 9}.EncodeBytes(make([]byte, 1<<20))), uint32(1<<16))
+	f.Fuzz(func(t *testing.T, data []byte, limit uint32) {
+		checkAllocated(t, len(data), func() {
+			l := int64(limit % (1 << 17))
+			out, err := ZlibCodec{}.DecodeBytesLimit(data, l)
+			if err == nil && int64(len(out)) > l {
+				t.Fatalf("inflated to %d bytes, past a limit of %d", len(out), l)
+			}
+			if out, err := (ZlibCodec{}).DecodeBytes(data); err == nil && int64(len(out)) > maxStoredBytes {
 				t.Fatalf("inflated to %d bytes, past a chunk", len(out))
 			}
 		})

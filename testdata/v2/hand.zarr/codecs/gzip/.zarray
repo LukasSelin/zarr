@@ -1,0 +1,11 @@
+{
+  "zarr_format": 2,
+  "shape": [4,5],
+  "chunks": [2,3],
+  "dtype": ">i4",
+  "fill_value": -7,
+  "order": "C",
+  "filters": null,
+  "compressor": {"id": "gzip", "level": 5},
+  "dimension_separator": "/"
+}

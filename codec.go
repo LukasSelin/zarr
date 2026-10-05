@@ -3,6 +3,7 @@ package zarr
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,8 @@ func init() {
 	RegisterCodec("sharding_indexed", parseSharding)
 	RegisterCodec("crc32c", func(json.RawMessage, DataType) (Codec, error) { return CRC32CCodec{}, nil })
 	RegisterCodec("numcodecs.shuffle", parseShuffle)
+	RegisterCodec("numcodecs.zlib", parseZlib)
+	RegisterCodec("numcodecs.gzip", parseGzip)
 }
 
 func parseCodec(n Named, d DataType) (Codec, error) {
@@ -453,6 +456,12 @@ func (GzipCodec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 	if len(data) >= 4 {
 		size = min(size, int64(binary.LittleEndian.Uint32(data[len(data)-4:])))
 	}
+	return inflate(r, size, limit, "gzip")
+}
+
+// inflate reads r to its end, into a buffer of size to begin with, and fails
+// rather than read past limit bytes.
+func inflate(r io.Reader, size, limit int64, name string) ([]byte, error) {
 	out := make([]byte, 0, size)
 	for {
 		if room := min(int64(cap(out)), limit); int64(len(out)) >= room {
@@ -464,7 +473,7 @@ func (GzipCodec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 				return nil, err
 			}
 			if int64(len(out)) >= limit {
-				return nil, fmt.Errorf("zarr: gzip: a chunk inflates past the %d bytes it may be", limit)
+				return nil, fmt.Errorf("zarr: %s: a chunk inflates past the %d bytes it may be", name, limit)
 			}
 			out = append(out, one[0])
 			continue
@@ -478,6 +487,73 @@ func (GzipCodec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
 			return nil, err
 		}
 	}
+}
+
+// ZlibCodec compresses with zlib at a level from 0 to 9: deflate in a zlib
+// stream, which has a header of two bytes and an Adler-32 checksum where gzip
+// has a header of ten and a CRC-32. It is numcodecs' zlib, which metadata
+// names "numcodecs.zlib" and Zarr version 2 calls "zlib".
+type ZlibCodec struct {
+	Level int
+}
+
+func parseZlib(cfg json.RawMessage, _ DataType) (Codec, error) {
+	var j struct {
+		Level *int `json:"level"`
+	}
+	if err := json.Unmarshal(cfg, &j); err != nil || j.Level == nil || *j.Level < 0 || *j.Level > 9 {
+		return nil, fmt.Errorf("zarr: zlib codec needs a level from 0 to 9: %s", cfg)
+	}
+	return ZlibCodec{Level: *j.Level}, nil
+}
+
+func (ZlibCodec) Name() string         { return "numcodecs.zlib" }
+func (c ZlibCodec) Configuration() any { return map[string]int{"level": c.Level} }
+
+// EncodedBound is what zlib encodes n bytes to at most: deflate's stored
+// blocks add 5 bytes to every 65 535, and the stream 6 more. This is well
+// above both.
+func (ZlibCodec) EncodedBound(n int64) int64 { return n + n/100 + 1024 }
+
+func (c ZlibCodec) EncodeBytes(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := zlib.NewWriterLevel(&buf, c.Level)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeBytes inflates data, to no more bytes than a chunk may be. An array
+// holds it to the bytes its chunks encode to.
+func (c ZlibCodec) DecodeBytes(data []byte) ([]byte, error) {
+	return c.DecodeBytesLimit(data, maxStoredBytes)
+}
+
+var zlibReaders sync.Pool
+
+func (ZlibCodec) DecodeBytesLimit(data []byte, limit int64) ([]byte, error) {
+	r, _ := zlibReaders.Get().(io.ReadCloser)
+	var err error
+	if r != nil {
+		err = r.(zlib.Resetter).Reset(bytes.NewReader(data), nil)
+	} else {
+		r, err = zlib.NewReader(bytes.NewReader(data))
+	}
+	if r != nil {
+		defer zlibReaders.Put(r)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// A zlib stream does not say how long it inflates to.
+	return inflate(r, min(limit, 1032*int64(len(data))+64), limit, "zlib")
 }
 
 // CRC32CCodec appends a CRC-32C checksum, little-endian, and checks it when

@@ -1,0 +1,11 @@
+{
+  "zarr_format": 2,
+  "shape": [7,6],
+  "chunks": [3,4],
+  "dtype": "<f4",
+  "fill_value": "-Infinity",
+  "order": "C",
+  "filters": [{"id": "shuffle", "elementsize": 4}],
+  "compressor": {"id": "zlib", "level": 1},
+  "dimension_separator": "."
+}

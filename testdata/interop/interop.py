@@ -6,6 +6,9 @@
 Both sides make each array's data the same way: element i of the array in
 C order is value(dtype, i), and the elements of the first chunk are the fill
 value, so that chunk is never stored and must read as the fill.
+
+The cases of "zarr_format": 2 are written in Zarr version 2, under the group
+v2, and zarr.Go reads them but does not write them: read leaves them out.
 """
 
 import json
@@ -13,6 +16,7 @@ import math
 import pathlib
 import sys
 
+import numcodecs
 import numpy as np
 import zarr
 from zarr.codecs import BytesCodec, Crc32cCodec, GzipCodec, ShardingCodec
@@ -57,10 +61,46 @@ def expected(case):
     return a
 
 
+def write_v2(group, case):
+    """Write a case of zarr_format 2 into the version 2 group."""
+    name = case["name"].split("/", 1)[1]
+    if "/" in name:
+        group.require_group(name.rsplit("/", 1)[0])
+    dtype = np.dtype(case["dtype"])
+    if case["endian"]:
+        dtype = dtype.newbyteorder("<" if case["endian"] == "little" else ">")
+    filters = [numcodecs.Shuffle(elementsize=dtype.itemsize) for c in case["compressors"] if c == "shuffle"]
+    compressor = None
+    for c in case["compressors"]:
+        if c == "zlib":
+            compressor = numcodecs.Zlib(level=5)
+        elif c == "gzip":
+            compressor = numcodecs.GZip(level=5)
+    names = case.get("dimension_names")
+    arr = group.create_array(
+        name,
+        shape=tuple(case["shape"]),
+        chunks=tuple(case["chunks"]),
+        dtype=dtype,
+        fill_value=fill_of(case),
+        order=case.get("order", "C"),
+        filters=filters or None,
+        compressors=compressor,
+        chunk_key_encoding={"name": "v2", "separator": case["separator"]},
+        attributes={"_ARRAY_DIMENSIONS": names} if names else None,
+    )
+    arr[...] = expected(case)
+
+
 def write(path):
     root = zarr.open_group(path, mode="w", zarr_format=3, attributes={"seed": SEED, "name": "terra"})
+    # A Zarr version 2 group beside the rest, for the cases of zarr_format 2.
+    v2 = zarr.open_group(pathlib.Path(path) / "v2", mode="w", zarr_format=2, attributes={"format": 2})
     for case in CASES:
         name = case["name"]
+        if case.get("zarr_format") == 2:
+            write_v2(v2, case)
+            continue
         if "/" in name:
             root.require_group(name.rsplit("/", 1)[0])
         compressors = [compressor_of(c, case["dtype"]) for c in case["compressors"]]
@@ -92,11 +132,7 @@ def write(path):
             dimension_names=case.get("dimension_names"),
         )
         arr[...] = expected(case)
-    # A Zarr version 2 group and array beside the rest, which zarr.Go must
-    # refuse as version 2 rather than as not there.
-    v2 = zarr.open_group(pathlib.Path(path) / "v2", mode="w", zarr_format=2, attributes={"format": 2})
-    v2.create_array("a", shape=(5,), chunks=(2,), dtype="int32", fill_value=0)[...] = np.arange(5, dtype="int32")
-    print(f"wrote {len(CASES)} arrays, and a version 2 group")
+    print(f"wrote {len(CASES)} arrays, {sum(c.get('zarr_format') == 2 for c in CASES)} of them in version 2")
 
 
 def read(path):
@@ -104,7 +140,8 @@ def read(path):
     failures = []
     if root.attrs.get("seed") != SEED:
         failures.append(f"seed attribute is {root.attrs.get('seed')!r}")
-    for case in CASES:
+    cases = [c for c in CASES if c.get("zarr_format", 3) == 3]
+    for case in cases:
         name = case["name"]
         try:
             arr = root[name]
@@ -141,7 +178,7 @@ def read(path):
     if failures:
         print("\n".join(failures))
         sys.exit(1)
-    print(f"read {len(CASES)} arrays")
+    print(f"read {len(cases)} arrays")
 
 
 if __name__ == "__main__":

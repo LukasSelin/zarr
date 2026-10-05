@@ -36,11 +36,12 @@ row, err := zarr.Read[float32](ctx, h, []int{100, 0}, []int{1, 1024})
 | `zstd` | in [`zstd`](zstd), a module of its own |
 | `blosc` | not in the standard library; register one with `RegisterCodec` |
 | `numcodecs.shuffle`, which the specification does not have | yes: `ShuffleCodec`, as zarr-python's `zarr.codecs.numcodecs.Shuffle` |
+| `numcodecs.zlib`, `numcodecs.gzip` | yes: `ZlibCodec`, and `GzipCodec` |
 | `transpose` codec | no |
 | `sharding_indexed` codec, index at either end | yes: `ArrayOptions.ShardShape`, or a `ShardingCodec` of your own |
 | Extensions with `must_understand: false` | ignored, as the specification allows |
 | Storage transformers | refused |
-| Zarr version 2 (`.zarray`, `.zgroup`) | refused with `ErrZarrV2`, which says so, rather than as not found |
+| Zarr version 2 (`.zarray`, `.zgroup`, `.zattrs`) | read, not written: see [below](#zarr-version-2) |
 
 Chunks that hold nothing but the fill value are deleted rather than
 written, as zarr-python does; set `Array.WriteEmptyChunks` to keep them.
@@ -229,6 +230,47 @@ is in the process, so two processes - or two machines - writing regions
 that share a stored object can still lose one of them; split such work
 along `ChunkShape`, or `ShardShape` if the array is sharded.
 
+## Zarr version 2
+
+A node with no `zarr.json` is opened from its version 2 metadata, the
+`.zarray` or `.zgroup` and the `.zattrs` beside it, so `OpenArray`,
+`OpenGroup`, `Children`, `OpenArrays`, `Read` and `ReadChunk` work on a
+store zarr-python 2 or xarray wrote, and `Metadata().ZarrFormat` is 2:
+
+```go
+era, _ := zarr.OpenArray(ctx, s, "t2m") // a .zarray: "<f4", zlib
+t, err := zarr.Read[float32](ctx, era, []int{0, 0, 0}, []int{1, 721, 1440})
+names := era.DimensionNames() // [time latitude longitude], from _ARRAY_DIMENSIONS
+```
+
+| `.zarray` | Here |
+|---|---|
+| `dtype` | `b1`, `i1`-`i8`, `u1`-`u8`, `f4`, `f8`, either byte order |
+| `fill_value` | numbers, `"NaN"`, `"Infinity"`, `"-Infinity"`; `null` is zero |
+| `order` | `"C"` and `"F"` |
+| `dimension_separator` | `.` and `/` |
+| `compressor` | `zlib`, `gzip`, null; `zstd` with the [`zstd`](zstd) module imported |
+| `filters` | `shuffle`, null |
+| `.zmetadata` | not read: each node's own metadata is |
+
+A compressor or filter whose `id` is `blosc` is the codec registered as
+`numcodecs.blosc`, given its configuration without the `id`, and so for any
+other: there is no blosc here, so it does not open until one is registered.
+The metadata an array opens with is what version 3 would have:
+`Metadata().Codecs` of `"F"` order begins with a `transpose`, and the
+compressor and filters are codecs after `bytes`. xarray keeps dimension
+names in the attribute `_ARRAY_DIMENSIONS`, which version 2 has no place
+for; where it names every dimension it is `DimensionNames`, and it stays an
+attribute too.
+
+Nothing is written in version 2. `Write`, `WriteChunk`, `Resize`, `Append`
+and `SetAttributes` on a version 2 node, and creating a node in a version 2
+group, are an error wrapping `ErrZarrV2`. Opening a node that is not there
+reads `zarr.json`, `.zarray` and `.zgroup`, one request each, and a version
+3 node `zarr.json` alone, as before. `DirStore` lists the four version 2
+metadata files, though they begin with a dot, so that `Delete` finds them;
+it deletes a node's `.zarray` and `.zgroup` first, as it does `zarr.json`.
+
 ## Stores that are not trusted
 
 Metadata, chunks and shards that are malformed are an error, never a
@@ -236,15 +278,15 @@ panic, and a store cannot make a read allocate more than its metadata
 implies, times `Array.Concurrency` - which is a Go field, so nothing a
 store holds can raise it. An array does not open if its shape counts more elements than an
 int, or if a chunk, a shard or a shard's index would be more than 2 GiB. A
-gzip chunk may inflate to no more than its elements take, through the
-codecs before it. A shard's index must put every chunk inside the shard,
+gzip or zlib chunk may inflate to no more than its elements take, through
+the codecs before it. A shard's index must put every chunk inside the shard,
 clear of the index and of every other chunk. A region read is made whole
 in memory, so look at the shape of an array from a stranger before reading
 all of it.
 
-The fuzz tests hold this: metadata, each codec, a shard and its index, and
-an array opened and read from a store of fuzzed keys, none of which may
-panic or allocate past a bound. `go test` runs their seeds and
+The fuzz tests hold this: metadata of either version, each codec, a shard
+and its index, and an array of either version opened and read from a store
+of fuzzed keys, none of which may panic or allocate past a bound. `go test` runs their seeds and
 `testdata/fuzz`; to fuzz one:
 
 ```sh
@@ -264,9 +306,11 @@ zarr-python every case this package writes: every data type, both endians,
 gzip, crc32c and `numcodecs.shuffle` alone and together, NaN and infinite
 fills, both separators, a scalar, a nested group, dimension names, a
 `uint64` attribute, and shards with the index at the end, at the start, and
-with a codec after the shard. It also has zarr-python write a Zarr version 2
-group and array, which must be refused with `ErrZarrV2`. It is skipped unless `ZARR_PYTHON` names a Python with `zarr`
-and `numpy`:
+with a codec after the shard. The cases of `"zarr_format": 2` zarr-python
+writes in Zarr version 2, for this package to read and not to write back:
+every data type, both endians, zlib, gzip and shuffle, both separators,
+Fortran order, a scalar, a nested group and `_ARRAY_DIMENSIONS`. It is
+skipped unless `ZARR_PYTHON` names a Python with `zarr` and `numpy`:
 
 ```sh
 python -m venv .venv && .venv/bin/pip install zarr numpy
