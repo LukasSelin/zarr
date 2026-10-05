@@ -35,8 +35,10 @@ compresses much without shuffle, which is typical of real float rasters.
 | gzip 9 | 109 | 379 | 44 | 156 | 1.16 |
 | shuffle + gzip 1 | 257 | 785 | 181 | 590 | 1.72 |
 | **shuffle + gzip 5** | **293** | **986** | 58 | 211 | **1.80** |
-| zstd 1 (`zstd` module) | – | 1871 | – | 1624 | 1.00 |
-| zstd 3 (`zstd` module) | – | 2062 | – | 1996 | 1.00 |
+| zstd 1 (`zstd` module)* | 1010 | 1516 | 550 | 846 | 1.00 |
+| zstd 3 (`zstd` module)* | 1235 | 1344 | 600 | 1117 | 1.00 |
+| shuffle + zstd 1 (`zstd` module)* | 516 | 1188 | 274 | 900 | 1.74 |
+| shuffle + zstd 3 (`zstd` module)* | 551 | 1232 | 243 | 678 | 1.77 |
 
 The rows `none` and `crc32c` are from after items 5 and 6 below, the
 median of 5 runs. The same runs measured the code of item 6 alone at 779
@@ -44,11 +46,26 @@ and 723 MB/s for a read on one core, where the first runs had 1041 and
 971, so the VM was about a quarter slower that day and the gain is larger
 than the rows show against the others.
 
-zstd did not compress this raster at all (a ratio of 1.00). It skips blocks
-it finds incompressible, so its speed here is close to that of `none` and
-does not predict its speed on data it does compress. zstd behind shuffle
-needs a tag of the core with `ShuffleCodec`, which the `zstd` module does
-not require yet.
+\* The zstd rows were measured on another machine: an AMD Ryzen 9 3900X,
+Windows amd64, Go 1.27.1, with `-cpu 4` added to the command above so that
+`default` is 4 cores, as on the VM. That machine compresses faster than the
+VM by different amounts per codec, so the rows compare with each other, not
+with the rows above. For scale, the same runs measured the core's rows there:
+
+| codec, same machine as the zstd rows | read, 1 core | read, 4 | write, 1 core | write, 4 | ratio |
+|---|---:|---:|---:|---:|---:|
+| none | 1387 MB/s | 1887 MB/s | 1589 MB/s | 2556 MB/s | 1.00 |
+| shuffle + gzip 5 | 377 | 921 | 219 | 617 | 1.79 |
+
+zstd alone did not compress this raster at all (a ratio of 1.00). It skips
+blocks it finds incompressible, so its speed there is close to that of
+`none` and does not predict its speed on data it does compress. Behind
+shuffle it compresses about as well as gzip 5 does behind shuffle (1.74 at
+level 1, 1.77 at 3, against 1.79), and reads about 1.4 times faster on one
+core (516–551 against 377 MB/s) and 1.3 times on four. It writes 1.1–1.25
+times faster on one core, and on four 1.5 times at level 1 but no faster at
+level 3. Level 3 buys 0.03 of ratio for a tenth of the write speed on one
+core.
 
 The data type (gzip 5, one core) makes no difference to MB/s: reads run at
 100–107 MB/s and writes at 39–46 MB/s for float32, float64, uint16 and
