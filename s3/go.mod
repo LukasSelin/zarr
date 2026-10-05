@@ -7,7 +7,7 @@ toolchain go1.25.13
 require (
 	github.com/LukasSelin/zarr v0.3.0
 	github.com/aws/aws-sdk-go-v2 v1.47.1
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.4
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.0
 	github.com/aws/smithy-go v1.28.2
 	go.uber.org/goleak v1.3.0
 )
