@@ -361,7 +361,9 @@ toolchain behind on its patch releases shows up as a finding of its own.
 Each `go.mod` asks for `go1.25.13` by its `toolchain` line and CI pins the
 same, so a build here and a build on a laptop are the same build; the
 `toolchain` line is ignored in a module that is not the main one, so it
-asks nothing of anyone who imports this. CI runs the scan weekly as well as
+asks nothing of anyone who imports this. The fuzz job alone runs Go 1.27.1:
+before it, the fuzzer can fail a run that found nothing
+([golang/go#75804](https://github.com/golang/go/issues/75804)). CI runs the scan weekly as well as
 on every push, because a vulnerability is usually published long after the
 code that has it was written.
 
