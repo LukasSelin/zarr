@@ -8,6 +8,7 @@ updates:
       - "/"
       - "/s3"
       - "/gcs"
+      - "/azblob"
       - "/zstd"
     schedule:
       interval: weekly
@@ -21,6 +22,10 @@ updates:
         patterns:
           - "cloud.google.com/*"
           - "google.golang.org/*"
+      azure-sdk:
+        patterns:
+          - "github.com/Azure/*"
+          - "github.com/AzureAD/*"
 
   - package-ecosystem: github-actions
     directory: "/"
