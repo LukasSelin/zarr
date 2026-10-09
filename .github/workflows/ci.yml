@@ -18,8 +18,8 @@ env:
   # standard library too (1.25.13 is where the crypto/tls, crypto/x509 and
   # net/url findings it had against 1.25.3 are fixed). So a build here and a
   # build on a laptop are the same build, and a module whose dependencies
-  # need a newer Go - gcs needs 1.26 - moves alone. The tidy job, which runs
-  # every module in one go, lets Go fetch each module's toolchain.
+  # need a newer Go - gcs and azblob need 1.26 - moves alone. The tidy job,
+  # which runs every module in one go, lets Go fetch each module's toolchain.
   # The fuzz job alone runs a newer Go. Before 1.27 the fuzzer sometimes
   # reports the end of -fuzztime as "context deadline exceeded" and fails a
   # run that found nothing (golang/go#75804); the fix was not backported to
