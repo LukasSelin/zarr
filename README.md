@@ -220,6 +220,15 @@ for a key that is not there, and with it set a chunk the server forbids
 reads as fill. `MaxObjectBytes`, 4 GiB unless set, is the most one value
 is read to, so a server cannot make a read allocate without bound.
 
+## A store for satellite and weather series
+
+[`github.com/LukasSelin/zarr/geodb`](geodb) is a module of its own built on
+this package: satellite scenes on each tile's grid with composites, gridded
+weather, and parcels, with the statistics of each parcel in each scene and
+the weather at each parcel worked out at ingest, so that the history of a
+parcel or a pixel is a few chunk reads. It has a chunk cache that is a
+`Store`, and an HTTP server, `geodb/cmd/geodbd`.
+
 ## zstd
 
 zstd is not in the standard library, so its codec is a module of its own,
