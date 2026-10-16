@@ -71,7 +71,7 @@ func reply(w http.ResponseWriter, v any, err error) {
 		code := http.StatusInternalServerError
 		var br badRequest
 		switch {
-		case errors.As(err, &br):
+		case errors.As(err, &br), errors.Is(err, ErrOffGrid):
 			code = http.StatusBadRequest
 		case errors.Is(err, ErrNotFound):
 			code = http.StatusNotFound

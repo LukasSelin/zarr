@@ -165,13 +165,17 @@ func TestASeriesAtAPointIsInterpolated(t *testing.T) {
 			t.Fatalf("step %d = %g, want %g", s, x.Value, want)
 		}
 	}
-	// Past the outer centres the edge cells are held.
-	edge, err := w.Series(ctx, "wind", 9, 61, weatherStart, weatherStart)
+	// Between the outer centres and the edge, the edge cells are held; off
+	// the grid there is nothing.
+	edge, err := w.Series(ctx, "wind", 10.05, 59.95, weatherStart, weatherStart)
 	if err != nil || len(edge) != 1 {
 		t.Fatal(edge, err)
 	}
 	if c := weatherGrid.Center(0, 0); math.Abs(float64(edge[0].Value)-field("wind", 0, c.X, c.Y)) > 1e-3 {
-		t.Errorf("off the north-west corner: %g", edge[0].Value)
+		t.Errorf("in the north-west corner: %g", edge[0].Value)
+	}
+	if _, err := w.Series(ctx, "wind", 9, 61, weatherStart, weatherStart); !errors.Is(err, ErrOffGrid) {
+		t.Errorf("off the grid: %v", err)
 	}
 }
 

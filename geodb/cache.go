@@ -144,31 +144,34 @@ func cut(key string, b []byte, offset, length int64) ([]byte, error) {
 }
 
 func (c *CachedStore) read(ctx context.Context, k cacheKey, fetch func() ([]byte, error)) ([]byte, error) {
-	c.mu.Lock()
-	if e, ok := c.entries[k]; ok {
-		c.lru.MoveToFront(e)
-		ent := e.Value.(*cacheEntry)
-		c.mu.Unlock()
-		c.hits.Add(1)
-		return answer(k.key, ent.value, ent.notFound)
-	}
-	if f, ok := c.flights[k]; ok {
+	// A read that joins another's waits for it; if that one was stopped by
+	// its own caller's context, this one reads again, a few times at most.
+	for attempt := 0; ; attempt++ {
+		c.mu.Lock()
+		if e, ok := c.entries[k]; ok {
+			c.lru.MoveToFront(e)
+			ent := e.Value.(*cacheEntry)
+			c.mu.Unlock()
+			c.hits.Add(1)
+			return answer(k.key, ent.value, ent.notFound)
+		}
+		f, joined := c.flights[k]
+		if !joined || attempt >= 3 {
+			break // with c.mu held
+		}
 		c.mu.Unlock()
 		select {
 		case <-f.done:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		if f.err != nil {
-			if (errors.Is(f.err, context.Canceled) || errors.Is(f.err, context.DeadlineExceeded)) && ctx.Err() == nil {
-				// The read was stopped by the context of whoever began it,
-				// not this one's: read again.
-				return c.read(ctx, k, fetch)
-			}
+		if f.err == nil {
+			c.hits.Add(1)
+			return answer(k.key, f.value, f.notFound)
+		}
+		if !(errors.Is(f.err, context.Canceled) || errors.Is(f.err, context.DeadlineExceeded)) || ctx.Err() != nil {
 			return nil, f.err
 		}
-		c.hits.Add(1)
-		return answer(k.key, f.value, f.notFound)
 	}
 	f := &flight{done: make(chan struct{})}
 	c.flights[k] = f
@@ -182,7 +185,9 @@ func (c *CachedStore) read(ctx context.Context, k cacheKey, fetch func() ([]byte
 	f.value, f.err = v, err
 
 	c.mu.Lock()
-	delete(c.flights, k)
+	if c.flights[k] == f {
+		delete(c.flights, k)
+	}
 	if err == nil && !f.stale {
 		c.put(&cacheEntry{k: k, value: v, notFound: f.notFound})
 	}
@@ -209,6 +214,9 @@ func (c *CachedStore) put(e *cacheEntry) {
 	if size > c.max {
 		return
 	}
+	if old, ok := c.entries[e.k]; ok {
+		c.remove(old)
+	}
 	for c.bytes+size > c.max {
 		c.remove(c.lru.Back())
 	}
@@ -234,8 +242,9 @@ func (c *CachedStore) remove(el *list.Element) {
 	c.bytes -= int64(len(e.value)) + int64(len(e.k.key))
 }
 
-// forget drops what the cache holds of key, whole or in ranges, and marks
-// reads of it under way as stale.
+// forget drops what the cache holds of key, whole or in ranges. A read of
+// it under way is let finish for whoever is waiting on it, but is not kept,
+// and reads that begin from now on do not join it.
 func (c *CachedStore) forget(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -245,8 +254,34 @@ func (c *CachedStore) forget(key string) {
 	for k, f := range c.flights {
 		if k.key == key {
 			f.stale = true
+			delete(c.flights, k)
 		}
 	}
+}
+
+func (c *CachedStore) forgetIf(drop func(key string) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, ks := range c.byKey {
+		if drop(key) {
+			for k := range ks {
+				c.remove(c.entries[k])
+			}
+		}
+	}
+	for k, f := range c.flights {
+		if drop(k.key) {
+			f.stale = true
+			delete(c.flights, k)
+		}
+	}
+}
+
+// Purge drops every value of the cache but those keep says to keep; nil
+// keeps none. DB.Refresh purges the cache of its store of what can change,
+// so that it reads afresh what another process may have written.
+func (c *CachedStore) Purge(keep func(key string) bool) {
+	c.forgetIf(func(k string) bool { return keep == nil || !keep(k) })
 }
 
 func (c *CachedStore) Set(ctx context.Context, key string, value []byte) error {

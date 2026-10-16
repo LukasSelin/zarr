@@ -80,16 +80,19 @@ func run(dir, url, addr string, cacheMB int64, refresh time.Duration) error {
 		Handler:           geodb.NewHandler(db),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// On a signal, stop taking requests and let those under way finish, for
+	// ten seconds at most, before returning.
+	drained := make(chan error, 1)
 	go func() {
 		<-ctx.Done()
-		shut, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shut, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shut)
+		drained <- srv.Shutdown(shut)
 	}()
 	log.Printf("serving %d tiles, %d weather sources and %d parcels on %s",
 		len(db.Tiles()), len(db.WeatherSources()), db.NumParcels(), addr)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	return nil
+	return <-drained
 }

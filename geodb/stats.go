@@ -133,16 +133,21 @@ func finishParcel(out []float32, p int, vals []int16, npix int32, v Variable) {
 		return
 	}
 	slices.Sort(vals)
-	var sum, sum2 float64
+	// Two passes, so that the deviation does not cancel away when the
+	// values are large next to their spread.
+	var sum float64
 	for _, x := range vals {
-		f := float64(x)*v.Scale + v.Offset
-		sum += f
-		sum2 += f * f
+		sum += float64(x)*v.Scale + v.Offset
 	}
 	n := float64(len(vals))
 	mean := sum / n
+	var ss float64
+	for _, x := range vals {
+		d := float64(x)*v.Scale + v.Offset - mean
+		ss += d * d
+	}
 	o[StatMean] = float32(mean)
-	o[StatStd] = float32(math.Sqrt(math.Max(0, sum2/n-mean*mean)))
+	o[StatStd] = float32(math.Sqrt(ss / n))
 	o[StatP10] = float32(percentile(vals, 0.10)*v.Scale + v.Offset)
 	o[StatP50] = float32(percentile(vals, 0.50)*v.Scale + v.Offset)
 	o[StatP90] = float32(percentile(vals, 0.90)*v.Scale + v.Offset)

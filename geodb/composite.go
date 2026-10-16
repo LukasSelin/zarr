@@ -11,57 +11,75 @@ import (
 )
 
 // UpdateComposites makes the composites of every period from the one from
-// is in to the one to is in, from the scenes in them. Doing it again for a
-// period gives what it gave before unless scenes were added to the period,
-// so run it after each ingest for the periods the new scenes fall in.
+// is in to the one to is in, from the scenes in them, and of any period
+// between the last made and from, so that none is left out. Doing it again
+// for a period gives what it gave before unless scenes were added to the
+// period, so run it after each ingest for the periods the new scenes fall
+// in. Scenes before the composite origin are in no period.
 //
-// It works a block of MapChunk square at a time, as many at once as there
-// are processors: a block reads its chunk of each scene in the periods, and
-// writes its own shards of the composites, which no other block touches.
+// It works a block of MapChunk square and CompositeTime periods deep at a
+// time, on as many blocks at once as there are processors, up to eight: a
+// block reads its chunk of each scene in its periods, and writes its own
+// shard of the composites, which no other block touches. What it holds is
+// about CompositeTime by MapChunk squared int16s a block.
+//
+// Composites have no commit marker: a reader in another process that
+// refreshes while they are made may see some periods made and others not
+// yet, which reads as missing values until it refreshes again.
 func (t *Tile) UpdateComposites(ctx context.Context, from, to time.Time) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
+	if err := t.reload(ctx); err != nil {
+		return err
+	}
 	st := t.state.Load()
 	m := st.meta
 	n := len(st.times)
 	if n == 0 {
 		return nil
 	}
-	// Periods past the scenes there are would be fill, so they are not made.
-	p0 := max(0, m.period(from.Unix()), m.period(st.times[0]))
-	p1 := min(m.period(to.Unix()), m.period(st.times[n-1])) + 1
-	if p1 <= p0 {
-		return nil
-	}
-	// The scenes of each period, by index.
-	byPeriod := make([][]int, p1-p0)
-	for i, ts := range st.times {
-		if p := m.period(ts); p >= p0 && p < p1 {
-			byPeriod[p-p0] = append(byPeriod[p-p0], i)
+	first, last := max(0, m.period(st.times[0])), m.period(st.times[n-1])
+	g := m.Grid
+	var blocks []Window
+	for r := 0; r < g.Height; r += m.MapChunk {
+		for c := 0; c < g.Width; c += m.MapChunk {
+			blocks = append(blocks, Window{c, r, min(m.MapChunk, g.Width-c), min(m.MapChunk, g.Height-r)})
 		}
 	}
-	g := m.Grid
 	for _, v := range m.Variables {
 		a, err := zarr.OpenArray(ctx, t.db.store, st.comps[v.Name].Path())
 		if err != nil {
 			return err
 		}
-		if k := a.Shape()[0]; int64(k) < p1 {
+		made := int64(a.Shape()[0])
+		// Periods past the scenes there are would be fill, so they are not
+		// made; periods between those made and from are.
+		p0 := max(first, min(m.period(from.Unix()), made))
+		p1 := min(m.period(to.Unix()), last) + 1
+		if p1 <= p0 {
+			continue
+		}
+		if made < p1 {
 			if err := a.Resize(ctx, []int{int(p1), g.Height, g.Width}); err != nil {
 				return err
 			}
 		}
-		var blocks []Window
-		for r := 0; r < g.Height; r += m.MapChunk {
-			for c := 0; c < g.Width; c += m.MapChunk {
-				blocks = append(blocks, Window{c, r, min(m.MapChunk, g.Width-c), min(m.MapChunk, g.Height-r)})
+		ct := int64(m.CompositeTime)
+		for b0 := p0; b0 < p1; {
+			b1 := min(p1, (b0/ct+1)*ct)
+			byPeriod := make([][]int, b1-b0)
+			for i, ts := range st.times {
+				if p := m.period(ts); p >= b0 && p < b1 {
+					byPeriod[p-b0] = append(byPeriod[p-b0], i)
+				}
 			}
-		}
-		err = parallel(ctx, len(blocks), runtime.GOMAXPROCS(0), func(ctx context.Context, b int) error {
-			return compositeBlock(ctx, st.scenes[v.Name], a, v, int(p0), byPeriod, blocks[b])
-		})
-		if err != nil {
-			return err
+			err = parallel(ctx, len(blocks), min(8, runtime.GOMAXPROCS(0)), func(ctx context.Context, b int) error {
+				return compositeBlock(ctx, st.scenes[v.Name], a, v, int(b0), byPeriod, blocks[b])
+			})
+			if err != nil {
+				return err
+			}
+			b0 = b1
 		}
 	}
 	return t.reload(ctx)
@@ -121,14 +139,17 @@ func reduce(how string, vals []int16) int16 {
 			return int16((sum + n/2) / n)
 		}
 		return int16((sum - n/2) / n)
-	default: // median, the mean of the middle two of an even count
+	default: // median, the mean of the middle two of an even count, rounded as mean is
 		slices.Sort(vals)
 		mid := len(vals) / 2
 		if len(vals)%2 == 1 {
 			return vals[mid]
 		}
-		a, b := int32(vals[mid-1]), int32(vals[mid])
-		return int16((a + b) / 2)
+		sum := int32(vals[mid-1]) + int32(vals[mid])
+		if sum >= 0 {
+			return int16((sum + 1) / 2)
+		}
+		return int16((sum - 1) / 2)
 	}
 }
 

@@ -93,7 +93,18 @@ func (db *DB) readRegistry(ctx context.Context) (*zarr.Group, registry, error) {
 // Refresh reads again what other processes may have written: the parcels,
 // and the scenes, steps and statistics of every tile and source, including
 // ones created since. Reads go on from the snapshot before until it is done.
+// If the store is a CachedStore, what is cached of what can change - all but
+// the chunks of scenes and parcels, which are written once - is dropped
+// first.
+//
+// A tile or source that cannot be read keeps the snapshot it had, and the
+// others are refreshed all the same; the error says which.
 func (db *DB) Refresh(ctx context.Context) error {
+	db.adminMu.Lock()
+	defer db.adminMu.Unlock()
+	if c, ok := db.store.(*CachedStore); ok {
+		c.Purge(writtenOnce)
+	}
 	_, reg, err := db.readRegistry(ctx)
 	if err != nil {
 		return err
@@ -103,13 +114,15 @@ func (db *DB) Refresh(ctx context.Context) error {
 		return err
 	}
 	db.parcels.Store(set)
+	var errs []error
 	for _, name := range reg.Tiles {
 		t := db.Tile(name)
 		if t == nil {
 			t = &Tile{db: db, name: name, path: joinPath("tiles", name)}
 		}
 		if err := t.reload(ctx); err != nil {
-			return fmt.Errorf("geodb: tile %s: %w", name, err)
+			errs = append(errs, fmt.Errorf("geodb: tile %s: %w", name, err))
+			continue
 		}
 		db.mu.Lock()
 		db.tiles[name] = t
@@ -121,13 +134,28 @@ func (db *DB) Refresh(ctx context.Context) error {
 			w = &Weather{db: db, name: name, path: joinPath("weather", name)}
 		}
 		if err := w.reload(ctx); err != nil {
-			return fmt.Errorf("geodb: weather %s: %w", name, err)
+			errs = append(errs, fmt.Errorf("geodb: weather %s: %w", name, err))
+			continue
 		}
 		db.mu.Lock()
 		db.weather[name] = w
 		db.mu.Unlock()
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// writtenOnce is whether a key is never written again once it is: a chunk
+// of a scene (not of their times), or anything of a generation of parcels.
+// Metadata is not, as arrays grow.
+func writtenOnce(key string) bool {
+	if strings.HasSuffix(key, "zarr.json") {
+		return false
+	}
+	if rest, ok := strings.CutPrefix(key, "parcels/g"); ok {
+		return strings.Contains(rest, "/")
+	}
+	parts := strings.SplitN(key, "/", 6) // tiles, t, scenes, var, c, ...
+	return len(parts) == 6 && parts[0] == "tiles" && parts[2] == "scenes" && parts[3] != "time" && parts[4] == "c"
 }
 
 // register adds a tile or source to the registry in the root.

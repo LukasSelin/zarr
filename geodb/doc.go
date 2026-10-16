@@ -26,25 +26,26 @@
 //
 // # Layout
 //
-//	/                                group: {"geodb": 1}
-//	parcels/                         group: {"count": P}
-//	  id            int64   (P)
-//	  bbox          float64 (P, 4)   min lon, min lat, max lon, max lat
-//	  ring_offset   int64   (P+1)    rings of parcel i: ring_offset[i:i+2]
-//	  coord_offset  int64   (R+1)    points of ring j: coord_offset[j:j+2]
-//	  coords        float64 (C, 2)   longitude, latitude
+//	/                                group: {"geodb": 1, "registry": ...}
+//	parcels/                         group: {"generation": G, "count": P}
+//	  g<G>/id       int64   (P)
+//	  g<G>/bbox     float64 (P, 4)   min lon, min lat, max lon, max lat
+//	  g<G>/ring_offset  int64 (P+1)  rings of parcel i: ring_offset[i:i+2]
+//	  g<G>/coord_offset int64 (R+1)  points of ring j: coord_offset[j:j+2]
+//	  g<G>/coords   float64 (C, 2)   longitude, latitude
 //	tiles/<tile>/                    group: grid, variables, composite period
 //	  scenes/time   int64   (N)      Unix seconds; the commit marker
 //	  scenes/<var>  int16   (N, H, W)        chunks (1, M, M)
 //	  composites/<var> int16 (K, H, W)       chunks (T, C, C), shards (T, M, M)
-//	  stats/parcel  int64   (Pt)     which parcel each row of stats is
-//	  stats/npix    int32   (Pt)     pixels of the parcel in the tile
-//	  stats/span_offset int64 (Pt+1)
-//	  stats/spans   int32   (S, 3)   row, first column, column past the last
-//	  stats/<var>   float32 (Pt, N, 6)
+//	  stats/g<G>/                    group: {"generation": G}, written last
+//	    parcel      int64   (Pt)     which parcel each row of stats is
+//	    npix        int32   (Pt)     pixels of the parcel in the tile
+//	    span_offset int64   (Pt+1)
+//	    spans       int32   (S, 3)   row, first column, column past the last
+//	    <var>       float32 (Pt, N, 6)
 //	weather/<source>/                group: grid, start, step, steps
 //	  <var>         float32 (T, H, W)        chunks (720, 32, 32)
-//	parcel_weather/<source>/         group: {"steps": T}
+//	parcel_weather/<source>/g<G>/    group: {"generation": G, "steps": T}
 //	  <var>         float32 (P, T)           chunks (256, 720)
 //
 // Values of a tile's variables are int16 with the CF attributes
@@ -60,6 +61,12 @@
 // and the next append cuts back what it left before writing. Readers never
 // look past a marker.
 //
+// Parcels, and what is made for them, are kept under a path of their
+// generation, which PutParcels makes current by writing it into the
+// attributes of parcels last. The generation before is kept, so a reader
+// with a snapshot of it goes on reading what was made for it, never another
+// parcel's rows; the one before that is deleted.
+//
 // That makes one writer per tile, and one per weather source, safe against
 // any number of readers in any number of processes. Two writers to the same
 // tile are not: run ingest for a tile in one place. Writes to different
@@ -74,6 +81,8 @@
 // the DB itself are seen at once.
 //
 // Wrap the store in NewCachedStore to keep the chunks read most in memory.
+// Refresh drops from it whatever can change, keeping only the chunks of
+// scenes and parcels, which are written once.
 //
 // # Coordinates
 //

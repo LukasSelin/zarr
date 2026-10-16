@@ -95,6 +95,9 @@ func codecs(t zarr.DataType) []zarr.Codec {
 // or scene that is not there wraps.
 var ErrNotFound = errors.New("geodb: not found")
 
+// ErrOffGrid is what asking for a point off a grid wraps.
+var ErrOffGrid = errors.New("geodb: off the grid")
+
 // isNotFound is whether err is a node or key that is not there.
 func isNotFound(err error) bool { return errors.Is(err, zarr.ErrNotFound) }
 

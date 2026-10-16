@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/LukasSelin/zarr"
@@ -24,6 +25,7 @@ type Parcel struct {
 // parcelSet is the parcels as read from the store, in their stored order.
 type parcelSet struct {
 	generation int64
+	previous   int64 // the generation before, whose data is kept still
 	ids        []int64
 	boxes      []BBox
 	ringOff    []int64 // rings of parcel i are ringOff[i] to ringOff[i+1]
@@ -93,10 +95,10 @@ const parcelChunk = 1 << 16
 
 // PutParcels replaces the parcels with ps. It is the one write of parcels
 // there is: the statistics of every tile and the samples of every weather
-// source are of the parcels they were made for, so it drops them, indexes
-// each tile anew and works out its statistics again from the scenes it
-// holds, which reads every scene. Do it before the scenes come, or when the
-// parcels change, not often.
+// source are of the parcels they were made for, so it indexes each tile
+// anew and works out its statistics again from the scenes it holds, which
+// reads every scene, and samples every weather source again. Do it before
+// the scenes come, or when the parcels change, not often.
 //
 // The parcels are kept in the order of a Hilbert curve through the centres
 // of their boxes, so that parcels near each other are near each other in
@@ -139,24 +141,24 @@ func (db *DB) PutParcels(ctx context.Context, ps []Parcel) error {
 		ringOff = append(ringOff, int64(len(coordOff)-1))
 	}
 
-	// What is made of the old parcels goes first, then the parcels, whose
-	// count is written last: a PutParcels that fails part way leaves no
-	// parcels rather than half of them.
-	for _, t := range db.Tiles() {
-		if err := zarr.Delete(ctx, db.store, joinPath(t.path, "stats")); err != nil {
-			return err
-		}
+	// Each PutParcels writes its parcels, and the statistics and samples made
+	// for them, under paths of their own generation, and makes them current
+	// by writing the generation into the attributes of parcels last. A reader
+	// with a snapshot of the generation before goes on reading what was made
+	// for it, until the next PutParcels but one takes it away.
+	prev := db.parcels.Load()
+	gen := time.Now().UnixNano()
+	if prev != nil && gen <= prev.generation {
+		gen = prev.generation + 1
 	}
-	if err := zarr.Delete(ctx, db.store, "parcel_weather"); err != nil {
+	pg, err := zarr.OpenGroup(ctx, db.store, "parcels")
+	if isNotFound(err) {
+		pg, err = zarr.CreateGroup(ctx, db.store, "parcels", nil)
+	}
+	if err != nil {
 		return err
 	}
-	if _, err := zarr.CreateGroup(ctx, db.store, "parcel_weather", nil); err != nil {
-		return err
-	}
-	if err := zarr.Delete(ctx, db.store, "parcels"); err != nil {
-		return err
-	}
-	g, err := zarr.CreateGroup(ctx, db.store, "parcels", nil)
+	g, err := pg.CreateGroup(ctx, genName(gen), nil)
 	if err != nil {
 		return err
 	}
@@ -175,8 +177,11 @@ func (db *DB) PutParcels(ctx context.Context, ps []Parcel) error {
 	if err := writeVector(ctx, g, "coords", []int{len(coords) / 2, 2}, []int{4 * parcelChunk, 2}, []string{"point", "axis"}, coords); err != nil {
 		return err
 	}
-	gen := time.Now().UnixNano()
-	if err := g.SetAttributes(ctx, map[string]any{"count": n, "generation": gen, "crs": "EPSG:4326"}); err != nil {
+	var prevGen int64
+	if prev != nil {
+		prevGen = prev.generation
+	}
+	if err := pg.SetAttributes(ctx, map[string]any{"count": n, "generation": gen, "previous": prevGen, "crs": "EPSG:4326"}); err != nil {
 		return err
 	}
 	set, err := loadParcels(ctx, db.store)
@@ -184,10 +189,8 @@ func (db *DB) PutParcels(ctx context.Context, ps []Parcel) error {
 		return err
 	}
 	db.parcels.Store(set)
-	for _, w := range db.WeatherSources() {
-		if err := w.reload(ctx); err != nil {
-			return err
-		}
+	if err := dropGenerations(ctx, db.store, "parcels", set); err != nil {
+		return err
 	}
 	for _, t := range db.Tiles() {
 		if err := t.indexParcels(ctx); err != nil {
@@ -197,6 +200,32 @@ func (db *DB) PutParcels(ctx context.Context, ps []Parcel) error {
 	for _, w := range db.WeatherSources() {
 		if err := w.SampleParcels(ctx); err != nil {
 			return fmt.Errorf("geodb: sampling weather source %s at the parcels: %w", w.name, err)
+		}
+	}
+	return nil
+}
+
+// genName is the name of the group of a generation of parcels.
+func genName(gen int64) string { return fmt.Sprintf("g%d", gen) }
+
+// dropGenerations deletes the groups under path of generations of parcels
+// other than set's and the one before it.
+func dropGenerations(ctx context.Context, s zarr.Store, path string, set *parcelSet) error {
+	keep := map[string]bool{genName(set.generation): true, genName(set.previous): true}
+	var drop []string
+	err := zarr.ListDir(ctx, s, path+"/", func(name string) error {
+		name = strings.TrimSuffix(name, "/")
+		if strings.HasPrefix(name, "g") && !keep[name] {
+			drop = append(drop, name)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, name := range drop {
+		if err := zarr.Delete(ctx, s, joinPath(path, name)); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -256,20 +285,24 @@ func loadParcels(ctx context.Context, s zarr.Store) (*parcelSet, error) {
 	if _, err := g.Attribute("generation", &set.generation); err != nil {
 		return nil, err
 	}
-	if set.ids, err = readVector[int64](ctx, s, "parcels/id"); err != nil {
+	if _, err := g.Attribute("previous", &set.previous); err != nil {
 		return nil, err
 	}
-	bbox, err := readVector[float64](ctx, s, "parcels/bbox")
+	at := func(name string) string { return joinPath("parcels", genName(set.generation), name) }
+	if set.ids, err = readVector[int64](ctx, s, at("id")); err != nil {
+		return nil, err
+	}
+	bbox, err := readVector[float64](ctx, s, at("bbox"))
 	if err != nil {
 		return nil, err
 	}
-	if set.ringOff, err = readVector[int64](ctx, s, "parcels/ring_offset"); err != nil {
+	if set.ringOff, err = readVector[int64](ctx, s, at("ring_offset")); err != nil {
 		return nil, err
 	}
-	if set.coordOff, err = readVector[int64](ctx, s, "parcels/coord_offset"); err != nil {
+	if set.coordOff, err = readVector[int64](ctx, s, at("coord_offset")); err != nil {
 		return nil, err
 	}
-	if set.coords, err = readVector[float64](ctx, s, "parcels/coords"); err != nil {
+	if set.coords, err = readVector[float64](ctx, s, at("coords")); err != nil {
 		return nil, err
 	}
 	if len(set.ids) != count || len(bbox) != 4*count || len(set.ringOff) != count+1 {

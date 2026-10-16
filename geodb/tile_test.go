@@ -385,7 +385,8 @@ func TestCompositesAreTheReducedValidValuesOfEachPeriod(t *testing.T) {
 						if len(vals)%2 == 1 {
 							want = v.decode(vals[m])
 						} else {
-							want = v.decode(int16((int32(vals[m-1]) + int32(vals[m])) / 2))
+							sum := int32(vals[m-1]) + int32(vals[m])
+							want = v.decode(int16(math.Round(float64(sum) / 2)))
 						}
 					}
 				}
@@ -409,8 +410,9 @@ func TestReduce(t *testing.T) {
 		{"median", nil, fill16},
 		{"median", []int16{5}, 5},
 		{"median", []int16{3, 1, 2}, 2},
-		{"median", []int16{4, 1, 3, 2}, 2},
-		{"median", []int16{-3, -4}, -3},
+		{"median", []int16{4, 1, 3, 2}, 3},
+		{"median", []int16{-3, -4}, -4},
+		{"median", []int16{3, 4}, 4},
 		{"max", []int16{-3, 7, 2}, 7},
 		{"mean", []int16{1, 2}, 2},
 		{"mean", []int16{-1, -2}, -2},
@@ -502,7 +504,7 @@ func (f *failing) GetRange(ctx context.Context, k string, off, n int64) ([]byte,
 
 func TestAnAppendThatFailsLeavesNothingAndTheNextOneCutsItBack(t *testing.T) {
 	ctx := context.Background()
-	for _, prefix := range []string{"tiles/t/scenes/time/", "tiles/t/stats/evi/", "tiles/t/scenes/evi/"} {
+	for _, prefix := range []string{"tiles/t/scenes/time/", "tiles/t/stats/", "tiles/t/scenes/evi/"} {
 		t.Run(prefix, func(t *testing.T) {
 			fs := &failing{Store: zarr.NewMemoryStore(), prefix: prefix}
 			db := newDB(t, fs)

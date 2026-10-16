@@ -25,10 +25,10 @@ together:
 |---|---|---|---|
 | `tiles/<t>/scenes/<var>` | the tile's own, e.g. UTM | 1 scene by 512 by 512 | a map of one date |
 | `tiles/<t>/composites/<var>` | the tile's own | 64 periods by 64 by 64, in shards of 512 | a pixel's history |
-| `tiles/<t>/stats/<var>` | parcels in the tile by scenes by 6 | 128 by 128 by 6 | a parcel's history |
+| `tiles/<t>/stats/g<gen>/<var>` | parcels in the tile by scenes by 6 | 128 by 128 by 6 | a parcel's history |
 | `weather/<s>/<var>` | longitude and latitude | 720 steps by 32 by 32 | weather at a point |
-| `parcel_weather/<s>/<var>` | parcels by steps | 256 by 720 | weather at a parcel |
-| `parcels/*` | ragged arrays, Hilbert-sorted | 65 536 parcels | the polygons |
+| `parcel_weather/<s>/g<gen>/<var>` | parcels by steps | 256 by 720 | weather at a parcel |
+| `parcels/g<gen>/*` | ragged arrays, Hilbert-sorted | 65 536 parcels | the polygons |
 
 Scenes come when the satellite passes, so their time axis is the real
 acquisition times. A pixel the cloud mask throws out is stored as the fill
@@ -39,7 +39,8 @@ periods (ten days by default) by median, max or mean of the valid values.
 Every scene appended is reduced, while still in memory, to six statistics
 of every parcel it covers: the valid fraction, mean, standard deviation and
 10th, 50th and 90th percentiles. Every weather step appended is sampled at
-every parcel, bilinearly at the centre of its box. That is what makes a
+every parcel, bilinearly at the centre of its box (NaN for a parcel off the
+source's grid). That is what makes a
 parcel's history cheap: the work is done once, at ingest.
 
 See [doc.go](doc.go) for the whole layout.
@@ -106,6 +107,13 @@ samples, the `count` of the parcels. An append that fails part way leaves
 the marker as it was, so readers see none of it, and the next append cuts
 back what it left before it writes. Readers never look past a marker.
 
+Parcels, and the statistics and samples made for them, live under a path
+of their generation. `PutParcels` writes a new generation whole and makes
+it current last, keeping the one before: a reader that has not refreshed
+goes on reading what was made for the parcels it has, never another
+parcel's row. If it stops part way, the next append to a tile, or
+`BackfillStats`, finishes indexing that tile.
+
 So one writer per tile and one per weather source is safe against any
 number of readers, in any number of processes. Two writers to one tile are
 not: the core's locks are in the process. Different tiles and sources may
@@ -117,8 +125,9 @@ be written at once, from anywhere. A DB serves reads from a snapshot;
 `NewCachedStore` keeps what is read in memory, least recently used out
 first, and remembers keys that are not there too, which for scenes under
 cloud is most of the saving. Reads of one key at once are one read of the
-store. `zarr.json` is not cached unless `CacheOptions.Metadata` says so, so
-a `Refresh` sees new scenes.
+store. `Refresh` drops from it everything that can change, keeping the
+chunks of scenes and of parcels, which are written once and are most of
+what is read.
 
 ## Coordinates
 
@@ -157,3 +166,6 @@ about 30 times the benchmark's scene.
   time: `PutParcels` replaces them all and works everything out again.
 - Reproject between CRSs other than to a tile's own from longitude and
   latitude.
+- Mark composites committed: a reader that refreshes while they are made
+  may see some periods missing until it refreshes again.
+- Tell apart scenes less than a second apart: times are whole seconds.

@@ -52,8 +52,9 @@ type Weather struct {
 	name string
 	path string
 
-	state   atomic.Pointer[weatherState]
-	writeMu sync.Mutex
+	state    atomic.Pointer[weatherState]
+	writeMu  sync.Mutex
+	reloadMu sync.Mutex // one reload at a time, so that none undoes a later one
 }
 
 type weatherState struct {
@@ -64,10 +65,14 @@ type weatherState struct {
 	// set up for the parcels there are now.
 	pwSteps int
 	pwGen   int64
+	pwSet   *parcelSet // the parcels the samples are of
 	pw      map[string]*zarr.Array
 }
 
-func (w *Weather) pwPath() string { return joinPath("parcel_weather", w.name) }
+// pwPath is where the samples at a generation of parcels are.
+func (w *Weather) pwPath(gen int64) string {
+	return joinPath("parcel_weather", w.name, genName(gen))
+}
 
 // CreateWeather makes a weather source.
 func (db *DB) CreateWeather(ctx context.Context, name string, o WeatherOptions) (*Weather, error) {
@@ -154,6 +159,8 @@ func (db *DB) CreateWeather(ctx context.Context, name string, o WeatherOptions) 
 }
 
 func (w *Weather) reload(ctx context.Context) error {
+	w.reloadMu.Lock()
+	defer w.reloadMu.Unlock()
 	s := w.db.store
 	g, err := zarr.OpenGroup(ctx, s, w.path)
 	if err != nil {
@@ -176,30 +183,33 @@ func (w *Weather) reload(ctx context.Context) error {
 		}
 		st.steps = min(st.steps, st.arrays[v].Shape()[0])
 	}
-	if set := w.db.parcels.Load(); set.len() > 0 {
-		pg, err := zarr.OpenGroup(ctx, s, w.pwPath())
-		switch {
-		case isNotFound(err):
-		case err != nil:
+	set := w.db.parcels.Load()
+	if set.len() == 0 {
+		w.state.Store(st)
+		return nil
+	}
+	pg, err := zarr.OpenGroup(ctx, s, w.pwPath(set.generation))
+	if isNotFound(err) {
+		w.state.Store(st)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var gen int64
+	if ok, err = pg.Attribute("generation", &gen); err != nil {
+		return err
+	}
+	if ok && gen == set.generation {
+		if _, err := pg.Attribute("steps", &st.pwSteps); err != nil {
 			return err
-		default:
-			var gen int64
-			ok, err := pg.Attribute("generation", &gen)
-			if err != nil {
+		}
+		st.pwSteps = min(st.pwSteps, st.steps)
+		st.pwGen, st.pwSet = gen, set
+		st.pw = map[string]*zarr.Array{}
+		for _, v := range st.meta.Variables {
+			if st.pw[v], err = pg.OpenArray(ctx, v); err != nil {
 				return err
-			}
-			if ok && gen == set.generation {
-				if _, err := pg.Attribute("steps", &st.pwSteps); err != nil {
-					return err
-				}
-				st.pwSteps = min(st.pwSteps, st.steps)
-				st.pwGen = gen
-				st.pw = map[string]*zarr.Array{}
-				for _, v := range st.meta.Variables {
-					if st.pw[v], err = pg.OpenArray(ctx, v); err != nil {
-						return err
-					}
-				}
 			}
 		}
 	}
@@ -268,14 +278,16 @@ func (w *Weather) Append(ctx context.Context, steps int, values map[string][]flo
 			return err
 		}
 	}
+	sampled := false
 	if st.pw != nil && st.pwSteps == n {
-		at := func(v string) func(s, row, col int) float32 {
+		at := func(v string) (func(s, row, col int) float32, error) {
 			vals := values[v]
-			return func(s, row, col int) float32 { return vals[(s*g.Height+row)*g.Width+col] }
+			return func(s, row, col int) float32 { return vals[(s*g.Height+row)*g.Width+col] }, nil
 		}
 		if err := w.appendSamples(ctx, st, n, steps, at); err != nil {
 			return err
 		}
+		sampled = true
 	}
 	g0, err := zarr.OpenGroup(ctx, w.db.store, w.path)
 	if err != nil {
@@ -283,6 +295,11 @@ func (w *Weather) Append(ctx context.Context, steps int, values map[string][]flo
 	}
 	if err := g0.SetAttributes(ctx, map[string]any{"steps": n + steps}); err != nil {
 		return err
+	}
+	if !sampled && w.db.parcels.Load().len() > 0 {
+		// The samples are not set up for the parcels there are, or fell
+		// behind: bring them up to date from the store.
+		return w.sampleLocked(ctx)
 	}
 	return w.reload(ctx)
 }
@@ -294,9 +311,13 @@ type cellWeight struct {
 }
 
 // weights are the cells and weights that interpolate the grid bilinearly
-// at p, between the centres of the cells around it; past the outer centres
-// the edge cells are held.
-func (g Grid) weights(p Point) [4]cellWeight {
+// at p, between the centres of the cells around it; between the outer
+// centres and the edge of the grid the edge cells are held. It is false for
+// a point off the grid.
+func (g Grid) weights(p Point) ([4]cellWeight, bool) {
+	if !g.Bounds().Contains(p) {
+		return [4]cellWeight{}, false
+	}
 	fc := (p.X-g.X0)/g.Dx - 0.5
 	fr := (g.Y0-p.Y)/g.Dy - 0.5
 	c0 := int(math.Max(0, math.Min(float64(g.Width-1), math.Floor(fc))))
@@ -309,7 +330,7 @@ func (g Grid) weights(p Point) [4]cellWeight {
 		{r0, c1, wx * (1 - wy)},
 		{r1, c0, (1 - wx) * wy},
 		{r1, c1, wx * wy},
-	}
+	}, true
 }
 
 // interpolate is the weighted mean of the values of the cells with a value,
@@ -334,21 +355,25 @@ func interpolate(ws [4]cellWeight, at func(row, col int) float32) float32 {
 }
 
 // parcelWeights are the cells each parcel samples, at the centre of its box.
+// A parcel off the grid samples none, and its samples are NaN.
 func (st *weatherState) parcelWeights(set *parcelSet) [][4]cellWeight {
 	out := make([][4]cellWeight, set.len())
 	for i, b := range set.boxes {
-		out[i] = st.meta.Grid.weights(b.center())
+		out[i], _ = st.meta.Grid.weights(b.center())
 	}
 	return out
 }
 
 // appendSamples samples steps n to n+k at every parcel, from at, and
 // appends them to the parcel samples.
-func (w *Weather) appendSamples(ctx context.Context, st *weatherState, n, k int, at func(v string) func(s, row, col int) float32) error {
-	set := w.db.parcels.Load()
+func (w *Weather) appendSamples(ctx context.Context, st *weatherState, n, k int, at func(v string) (func(s, row, col int) float32, error)) error {
+	set := st.pwSet
 	ws := st.parcelWeights(set)
 	for _, v := range st.meta.Variables {
-		get := at(v)
+		get, err := at(v)
+		if err != nil {
+			return err
+		}
 		out := make([]float32, set.len()*k)
 		for p := range ws {
 			for s := range k {
@@ -363,7 +388,7 @@ func (w *Weather) appendSamples(ctx context.Context, st *weatherState, n, k int,
 			return err
 		}
 	}
-	pg, err := zarr.OpenGroup(ctx, w.db.store, w.pwPath())
+	pg, err := zarr.OpenGroup(ctx, w.db.store, w.pwPath(st.pwGen))
 	if err != nil {
 		return err
 	}
@@ -372,11 +397,15 @@ func (w *Weather) appendSamples(ctx context.Context, st *weatherState, n, k int,
 
 // SampleParcels brings the samples at the parcels up to the steps the
 // source holds, setting them up first if the parcels are new. It reads the
-// steps it samples a chunk deep at a time, and of each only the chunks some
-// parcel samples.
+// steps it samples a chunk deep at a time, a variable at a time, and of each
+// only the chunks some parcel samples.
 func (w *Weather) SampleParcels(ctx context.Context) error {
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
+	return w.sampleLocked(ctx)
+}
+
+func (w *Weather) sampleLocked(ctx context.Context) error {
 	if err := w.reload(ctx); err != nil {
 		return err
 	}
@@ -385,7 +414,7 @@ func (w *Weather) SampleParcels(ctx context.Context) error {
 		return nil
 	}
 	st := w.state.Load()
-	if st.pw == nil {
+	if st.pw == nil || st.pwGen != set.generation {
 		if err := w.setUpSamples(ctx, st, set); err != nil {
 			return err
 		}
@@ -396,38 +425,36 @@ func (w *Weather) SampleParcels(ctx context.Context) error {
 	}
 	m := st.meta
 	g := m.Grid
-	ws := st.parcelWeights(set)
+	ws := st.parcelWeights(st.pwSet)
 	// The chunks of the grid any parcel samples.
 	chunkOf := func(row, col int) [2]int { return [2]int{row / m.ChunkSide, col / m.ChunkSide} }
 	need := map[[2]int]bool{}
 	for _, cw := range ws {
 		for _, c := range cw {
-			need[chunkOf(c.row, c.col)] = true
+			if c.w != 0 {
+				need[chunkOf(c.row, c.col)] = true
+			}
 		}
 	}
 	for n := st.pwSteps; n < st.steps; {
 		k := min(st.steps-n, m.ChunkSteps-n%m.ChunkSteps)
-		read := map[string]map[[2]int][]float32{}
-		for _, v := range m.Variables {
-			read[v] = map[[2]int][]float32{}
+		at := func(v string) (func(s, row, col int) float32, error) {
+			chunks := map[[2]int][]float32{}
 			for c := range need {
 				r0, c0 := c[0]*m.ChunkSide, c[1]*m.ChunkSide
 				h, wd := min(m.ChunkSide, g.Height-r0), min(m.ChunkSide, g.Width-c0)
 				data, err := zarr.Read[float32](ctx, st.arrays[v], []int{n, r0, c0}, []int{k, h, wd})
 				if err != nil {
-					return err
+					return nil, err
 				}
-				read[v][c] = data
+				chunks[c] = data
 			}
-		}
-		at := func(v string) func(s, row, col int) float32 {
-			chunks := read[v]
 			return func(s, row, col int) float32 {
 				c := chunkOf(row, col)
 				r0, c0 := c[0]*m.ChunkSide, c[1]*m.ChunkSide
 				h, wd := min(m.ChunkSide, g.Height-r0), min(m.ChunkSide, g.Width-c0)
 				return chunks[c][(s*h+row-r0)*wd+col-c0]
-			}
+			}, nil
 		}
 		if err := w.appendSamples(ctx, st, n, k, at); err != nil {
 			return err
@@ -437,12 +464,23 @@ func (w *Weather) SampleParcels(ctx context.Context) error {
 	return w.reload(ctx)
 }
 
+// setUpSamples makes the arrays of samples at set, under a path of its
+// generation, and deletes those of generations before the one before.
 func (w *Weather) setUpSamples(ctx context.Context, st *weatherState, set *parcelSet) error {
 	s := w.db.store
-	if err := zarr.Delete(ctx, s, w.pwPath()); err != nil {
+	parent := joinPath("parcel_weather", w.name)
+	if _, err := zarr.OpenGroup(ctx, s, parent); isNotFound(err) {
+		if _, err := zarr.CreateGroup(ctx, s, parent, nil); err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
-	g, err := zarr.CreateGroup(ctx, s, w.pwPath(), nil)
+	path := w.pwPath(set.generation)
+	if err := zarr.Delete(ctx, s, path); err != nil {
+		return err
+	}
+	g, err := zarr.CreateGroup(ctx, s, path, nil)
 	if err != nil {
 		return err
 	}
@@ -459,7 +497,10 @@ func (w *Weather) setUpSamples(ctx context.Context, st *weatherState, set *parce
 			return err
 		}
 	}
-	return g.SetAttributes(ctx, map[string]any{"generation": set.generation, "steps": 0})
+	if err := g.SetAttributes(ctx, map[string]any{"generation": set.generation, "steps": 0}); err != nil {
+		return err
+	}
+	return dropGenerations(ctx, s, parent, set)
 }
 
 // Series is the source's values at a longitude and latitude, interpolated
@@ -476,7 +517,10 @@ func (w *Weather) Series(ctx context.Context, variable string, lon, lat float64,
 	if s0 == s1 {
 		return nil, nil
 	}
-	ws := m.Grid.weights(Point{lon, lat})
+	ws, ok := m.Grid.weights(Point{lon, lat})
+	if !ok {
+		return nil, fmt.Errorf("%w: (%g, %g) is off the grid of weather source %s", ErrOffGrid, lon, lat, w.name)
+	}
 	r0, c0 := ws[0].row, ws[0].col
 	h, wd := ws[3].row-r0+1, ws[3].col-c0+1
 	data, err := zarr.Read[float32](ctx, a, []int{s0, r0, c0}, []int{s1 - s0, h, wd})
@@ -511,6 +555,8 @@ func (db *DB) ParcelWeather(ctx context.Context, source, variable string, id int
 	st := w.state.Load()
 	a, ok := st.pw[variable]
 	if ok && st.pwGen != set.generation {
+		// The snapshot of the source is of other parcels than the one of
+		// the parcels: a PutParcels or Refresh is under way.
 		return nil, fmt.Errorf("geodb: weather source %s has not been sampled at the parcels there are now", source)
 	}
 	if !ok {

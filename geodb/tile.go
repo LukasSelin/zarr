@@ -136,9 +136,13 @@ type Tile struct {
 	name string
 	path string
 
-	state   atomic.Pointer[tileState]
-	writeMu sync.Mutex // one writer in this process at a time
+	state    atomic.Pointer[tileState]
+	writeMu  sync.Mutex // one writer in this process at a time
+	reloadMu sync.Mutex // one reload at a time, so that none undoes a later one
 }
+
+// statsPath is where the statistics made for a generation of parcels are.
+func (t *Tile) statsPath(gen int64) string { return joinPath(t.path, "stats", genName(gen)) }
 
 // tileState is a snapshot of a tile. Nothing in it changes once it is made.
 type tileState struct {
@@ -245,6 +249,8 @@ func (db *DB) CreateTile(ctx context.Context, name string, o TileOptions) (*Tile
 
 // reload makes a new snapshot of the tile from the store.
 func (t *Tile) reload(ctx context.Context) error {
+	t.reloadMu.Lock()
+	defer t.reloadMu.Unlock()
 	s := t.db.store
 	g, err := zarr.OpenGroup(ctx, s, t.path)
 	if err != nil {
@@ -285,7 +291,7 @@ func (t *Tile) reload(ctx context.Context) error {
 	if tp.len() > 0 {
 		st.parcels = tp
 		for _, v := range st.meta.Variables {
-			a, err := zarr.OpenArray(ctx, s, joinPath(t.path, "stats", v.Name))
+			a, err := zarr.OpenArray(ctx, s, joinPath(t.statsPath(tp.generation), v.Name))
 			if err != nil {
 				return err
 			}
@@ -306,7 +312,8 @@ func (t *Tile) loadParcelIndex(ctx context.Context, meta tileMeta) (*tileParcels
 	if set.len() == 0 {
 		return nil, nil
 	}
-	g, err := zarr.OpenGroup(ctx, s, joinPath(t.path, "stats"))
+	path := t.statsPath(set.generation)
+	g, err := zarr.OpenGroup(ctx, s, path)
 	if isNotFound(err) {
 		return nil, nil
 	}
@@ -320,16 +327,16 @@ func (t *Tile) loadParcelIndex(ctx context.Context, meta tileMeta) (*tileParcels
 	if prev := t.state.Load(); prev != nil && prev.parcels != nil && prev.parcels.generation == tp.generation {
 		return prev.parcels, nil
 	}
-	if tp.ordinal, err = readVector[int64](ctx, s, joinPath(t.path, "stats", "parcel")); err != nil {
+	if tp.ordinal, err = readVector[int64](ctx, s, joinPath(path, "parcel")); err != nil {
 		return nil, err
 	}
-	if tp.npix, err = readVector[int32](ctx, s, joinPath(t.path, "stats", "npix")); err != nil {
+	if tp.npix, err = readVector[int32](ctx, s, joinPath(path, "npix")); err != nil {
 		return nil, err
 	}
-	if tp.spanOff, err = readVector[int64](ctx, s, joinPath(t.path, "stats", "span_offset")); err != nil {
+	if tp.spanOff, err = readVector[int64](ctx, s, joinPath(path, "span_offset")); err != nil {
 		return nil, err
 	}
-	raw, err := readVector[int32](ctx, s, joinPath(t.path, "stats", "spans"))
+	raw, err := readVector[int32](ctx, s, joinPath(path, "spans"))
 	if err != nil {
 		return nil, err
 	}
@@ -355,11 +362,32 @@ func (t *Tile) loadParcelIndex(ctx context.Context, meta tileMeta) (*tileParcels
 }
 
 // indexParcels works out which parcels the tile covers and their pixels,
-// makes the statistics arrays anew, and works the statistics out for the
-// scenes there are.
+// makes the statistics arrays for them, and works the statistics out for
+// the scenes there are.
 func (t *Tile) indexParcels(ctx context.Context) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
+	return t.indexLocked(ctx)
+}
+
+// indexIfStale indexes the tile if there are parcels it is not indexed for:
+// a PutParcels that stopped before it got to this tile, or one made by
+// another process since this tile was last indexed here.
+func (t *Tile) indexIfStale(ctx context.Context) error {
+	set := t.db.parcels.Load()
+	if set.len() == 0 {
+		return nil
+	}
+	if tp := t.state.Load().parcels; tp != nil && tp.generation == set.generation {
+		return nil
+	}
+	return t.indexLocked(ctx)
+}
+
+func (t *Tile) indexLocked(ctx context.Context) error {
+	if err := t.reload(ctx); err != nil {
+		return err
+	}
 	st := t.state.Load()
 	set := t.db.parcels.Load()
 	g := st.meta.Grid
@@ -390,8 +418,18 @@ func (t *Tile) indexParcels(ctx context.Context) error {
 		tp.spanOff = append(tp.spanOff, int64(len(tp.spans)))
 	}
 
+	// The index goes under a path of the parcels' generation, written whole
+	// before its generation attribute: a reader of another generation never
+	// sees it, and an index that was not finished is begun again.
 	s := t.db.store
-	path := joinPath(t.path, "stats")
+	if _, err := zarr.OpenGroup(ctx, s, joinPath(t.path, "stats")); isNotFound(err) {
+		if _, err := zarr.CreateGroup(ctx, s, joinPath(t.path, "stats"), nil); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	path := t.statsPath(set.generation)
 	if err := zarr.Delete(ctx, s, path); err != nil {
 		return err
 	}
@@ -432,6 +470,9 @@ func (t *Tile) indexParcels(ctx context.Context) error {
 	if err := sg.SetAttributes(ctx, map[string]any{"generation": set.generation}); err != nil {
 		return err
 	}
+	if err := dropGenerations(ctx, s, joinPath(t.path, "stats"), set); err != nil {
+		return err
+	}
 	if err := t.reload(ctx); err != nil {
 		return err
 	}
@@ -454,12 +495,18 @@ func projectedBBox(p Projection, b BBox) BBox {
 func float32NaN() float32 { return float32(math.NaN()) }
 
 // BackfillStats works out the parcel statistics of the scenes that do not
-// have them yet: those appended while the tile was not indexed for the
-// parcels there are, or whose statistics an append did not get to write.
-// It reads each of those scenes once.
+// have them yet: those whose statistics an append did not get to write, or
+// all of them if the tile is not indexed for the parcels there are, which
+// it indexes first. It reads each of those scenes once.
 func (t *Tile) BackfillStats(ctx context.Context) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
+	if err := t.reload(ctx); err != nil {
+		return err
+	}
+	if err := t.indexIfStale(ctx); err != nil {
+		return err
+	}
 	return t.backfillLocked(ctx)
 }
 
@@ -524,7 +571,22 @@ func (t *Tile) AppendScene(ctx context.Context, sc Scene) (int, error) {
 	if err := t.reload(ctx); err != nil {
 		return 0, err
 	}
+	if err := t.indexIfStale(ctx); err != nil {
+		return 0, err
+	}
 	st := t.state.Load()
+	for _, v := range st.meta.Variables {
+		if st.parcels.len() > 0 && st.statsN[v.Name] < len(st.times) {
+			// Statistics that fell behind - an append made while another
+			// generation of parcels was current here - are caught up first,
+			// so that this scene's can follow them.
+			if err := t.backfillLocked(ctx); err != nil {
+				return 0, err
+			}
+			st = t.state.Load()
+			break
+		}
+	}
 	g := st.meta.Grid
 	n := len(st.times)
 	ts := sc.Time.Unix()
