@@ -2,7 +2,6 @@
 // geodb.NewHandler for the routes.
 //
 //	geodbd -dir /data/geo.zarr -addr :8080 -cache-mb 1024
-//	geodbd -url https://example.com/geo.zarr
 //
 // It reads the store through a cache, and takes a new snapshot of it every
 // -refresh, so that scenes ingested by another process are served.
@@ -26,30 +25,22 @@ import (
 
 func main() {
 	dir := flag.String("dir", "", "the store, a directory")
-	url := flag.String("url", "", "the store, published over HTTP (read only)")
 	addr := flag.String("addr", ":8080", "where to listen")
 	cacheMB := flag.Int64("cache-mb", 512, "the most the chunk cache holds, in MiB")
 	refresh := flag.Duration("refresh", 30*time.Second, "how often to look for what other processes wrote; 0 never")
 	flag.Parse()
-	if err := run(*dir, *url, *addr, *cacheMB, *refresh); err != nil {
+	if err := run(*dir, *addr, *cacheMB, *refresh); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(dir, url, addr string, cacheMB int64, refresh time.Duration) error {
-	var store zarr.Store
-	switch {
-	case (dir == "") == (url == ""):
-		return errors.New("give one of -dir and -url")
-	case dir != "":
-		store = zarr.NewDirStore(dir)
-	default:
-		s, err := zarr.NewHTTPStore(url, nil)
-		if err != nil {
-			return err
-		}
-		store = s
+func run(dir, addr string, cacheMB int64, refresh time.Duration) error {
+	if dir == "" {
+		return errors.New("give the store with -dir")
 	}
+	// A store over HTTP is not here yet: zarr.NewHTTPStore is newer than the
+	// tag of the core this module requires.
+	var store zarr.Store = zarr.NewDirStore(dir)
 	cached := geodb.NewCachedStore(store, geodb.CacheOptions{MaxBytes: cacheMB << 20})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
