@@ -132,7 +132,7 @@ func TestASetOrDeleteThroughTheCacheIsSeen(t *testing.T) {
 func TestReadsOfOneKeyAtOnceAreOneRead(t *testing.T) {
 	ctx := context.Background()
 	inner := &counting{Store: zarr.NewMemoryStore(), hold: make(chan struct{})}
-	_ = inner.Store.Set(ctx, "k", []byte("v"))
+	_ = inner.Set(ctx, "k", []byte("v"))
 	c := NewCachedStore(inner, CacheOptions{})
 	var wg sync.WaitGroup
 	for range 20 {
@@ -158,7 +158,7 @@ func TestReadsOfOneKeyAtOnceAreOneRead(t *testing.T) {
 func TestAReadUnderWayWhenTheKeyIsSetIsNotKept(t *testing.T) {
 	ctx := context.Background()
 	inner := &counting{Store: zarr.NewMemoryStore(), hold: make(chan struct{})}
-	_ = inner.Store.Set(ctx, "k", []byte("old"))
+	_ = inner.Set(ctx, "k", []byte("old"))
 	c := NewCachedStore(inner, CacheOptions{})
 	done := make(chan []byte)
 	go func() {
@@ -179,7 +179,7 @@ func TestAReadUnderWayWhenTheKeyIsSetIsNotKept(t *testing.T) {
 
 func TestAWaiterWhoseLeaderIsCancelledReadsAgain(t *testing.T) {
 	inner := &slowFirst{Store: zarr.NewMemoryStore(), started: make(chan struct{})}
-	_ = inner.Store.Set(context.Background(), "k", []byte("v"))
+	_ = inner.Set(context.Background(), "k", []byte("v"))
 	c := NewCachedStore(inner, CacheOptions{})
 	leader, cancel := context.WithCancel(context.Background())
 	go func() { _, _ = c.Get(leader, "k") }()

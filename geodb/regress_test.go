@@ -171,7 +171,7 @@ func TestATileLeftUnindexedIsIndexedByTheNextWrite(t *testing.T) {
 func TestAGetAfterASetDoesNotJoinAReadFromBefore(t *testing.T) {
 	ctx := context.Background()
 	inner := &counting{Store: zarr.NewMemoryStore(), hold: make(chan struct{})}
-	_ = inner.Store.Set(ctx, "k", []byte("old"))
+	_ = inner.Set(ctx, "k", []byte("old"))
 	c := NewCachedStore(inner, CacheOptions{})
 	first := make(chan []byte)
 	go func() {

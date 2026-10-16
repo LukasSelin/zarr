@@ -393,7 +393,7 @@ func (t *Tile) indexLocked(ctx context.Context) error {
 	g := st.meta.Grid
 	tb := g.Bounds()
 
-	tp := &tileParcels{generation: set.generation, spanOff: []int64{0}}
+	tp := &tileParcels{spanOff: []int64{0}}
 	for i := range set.len() {
 		if !projectedBBox(st.proj, set.boxes[i]).Intersects(tb) {
 			continue

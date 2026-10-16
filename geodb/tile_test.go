@@ -566,7 +566,7 @@ func TestOverlappingTilesGiveOneObservationAPass(t *testing.T) {
 	}
 	// Tile b's pass of scene 0 is cloudy over the parcel; at scene 1 tile a's is.
 	sa0, sb0 := testScene(a, 0), testScene(b, 0)
-	clear := func(sc Scene) Scene {
+	cloudOver := func(sc Scene) Scene {
 		for _, v := range sc.Values {
 			for k := range v {
 				v[k] = float32(math.NaN())
@@ -574,9 +574,9 @@ func TestOverlappingTilesGiveOneObservationAPass(t *testing.T) {
 		}
 		return sc
 	}
-	sb0 = clear(sb0)
+	sb0 = cloudOver(sb0)
 	sb0.Time = sa0.Time.Add(20 * time.Second)
-	sa1, sb1 := clear(testScene(a, 1)), testScene(b, 1)
+	sa1, sb1 := cloudOver(testScene(a, 1)), testScene(b, 1)
 	for _, c := range []struct {
 		t  *Tile
 		sc Scene
