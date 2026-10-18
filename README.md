@@ -307,6 +307,44 @@ is in the process, so two processes - or two machines - writing regions
 that share a stored object can still lose one of them; split such work
 along `ChunkShape`, or `ShardShape` if the array is sharded.
 
+## Geographic data
+
+[`geozarr`](geozarr) keeps data tied to places on the earth, in the two
+shapes it comes in. A `Raster` is an array whose last two dimensions are
+rows and columns, with a CRS and an affine transform written as GeoZarr's
+`proj:` and `spatial:` attributes and GDAL's `_CRS` (and, with
+`Coordinates`, the `x`, `y` and `spatial_ref` arrays xarray and rioxarray
+read):
+
+```go
+r, _ := geozarr.CreateRaster(ctx, root, "dem", geozarr.RasterOptions{
+	Width: 10980, Height: 10980, DataType: zarr.Float32,
+	CRS:       geozarr.CRS{EPSG: 32633},
+	Transform: geozarr.NorthUp(500000, 6000000, 10, 10),
+	ChunkSize: 256, ShardSize: 2048,
+})
+err := geozarr.Ingest(ctx, r, func(b geozarr.Block, dst []float32) error {
+	return src.ReadInto(b.Window, dst) // one shard, written once
+})
+v, win, err := geozarr.ReadBBox[float32](ctx, r, nil, geozarr.BBox{...})
+s, _ := geozarr.NewSampler[float32](r, 256)
+h, ok, err := s.At(ctx, nil, x, y)
+```
+
+`Ingest` asks for the raster one stored object at a time and writes as many
+at once as `Concurrency`, so nothing is read back: a 4096 by 4096 float32
+raster goes in six to seventeen times faster than by row strips. A
+`Sampler` keeps the chunks it has decoded; a point in one of them is half a
+microsecond.
+
+`Units` are places that are not on a grid - regions, postcodes, the cells
+of a discrete global grid - by int64 id and bounding box, and a `Variable`
+is an array along them, `[time, unit]` say, chunked so that one unit's
+series is one chunk (`ReadUnit`, `ReadUnits`). `Zonal` gathers the count,
+sum, minimum and maximum of a raster's pixels for each unit from a raster
+of unit ids on the same grid, and `Units.Column` lines them up to write.
+The package does not reproject.
+
 ## Zarr version 2
 
 A node with no `zarr.json` is opened from its version 2 metadata, the
@@ -396,6 +434,26 @@ ZARR_PYTHON=.venv/bin/python go test -run ZarrPython .
 ```
 
 Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
+
+`TestGeoPython` in `geozarr` does the same for rasters, with
+`testdata/interop/geozarr.py`: xarray and rioxarray read the rasters
+`geozarr` writes, a plain one and a sharded one with a band dimension, and
+find their CRS, transform, `x` and `y` and pixels; GDAL's Zarr driver,
+through rasterio, finds the CRS in `_CRS` and in `proj:`, each alone, and
+the geotransform in `x` and `y`. Then rioxarray writes a raster and
+`OpenRaster` reads it through its `grid_mapping`. rioxarray writes the CRS
+as WKT1, which `OpenRaster` keeps as its EPSG code; GDAL 3.12 cannot read a
+sharded array, and without `Coordinates` it finds the CRS but not the
+geotransform. It is skipped unless `GEOZARR_PYTHON` names a Python with
+`zarr`, `xarray`, `rioxarray` and `rasterio`:
+
+```sh
+.venv/bin/pip install zarr xarray rioxarray rasterio
+GEOZARR_PYTHON=.venv/bin/python go test -run GeoPython ./geozarr
+```
+
+Last run against xarray 2026.9.0, rioxarray 0.23.0, rasterio 1.5.2 with
+GDAL 3.12.2, zarr-python 3.4.1.
 
 ## Checks
 
