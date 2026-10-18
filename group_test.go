@@ -74,7 +74,12 @@ func TestChildrenStopAtTheFirstFailedRead(t *testing.T) {
 	m := NewMemoryStore()
 	family(t, m, 100)
 	broken := errors.New("broken read")
-	s := &failingGet{Store: m, substring: "a003/", err: broken}
+	// The children are read in sorted order, and those after the failing
+	// one wait for the read to be cancelled, so that however the workers are
+	// scheduled none of them reads on past it: the read is over only if the
+	// failure cancelled it, and each worker beside the failing one reads one
+	// child past it at most.
+	s := &orderedGet{waitingGet{failingGet: failingGet{Store: m, substring: "a003/", err: broken}}}
 	g, err := OpenGroup(ctx, s, "")
 	if err != nil {
 		t.Fatal(err)
@@ -86,9 +91,31 @@ func TestChildrenStopAtTheFirstFailedRead(t *testing.T) {
 	if _, err := g.OpenArrays(ctx); !errors.Is(err, broken) {
 		t.Fatalf("open arrays: %v, want %v", err, broken)
 	}
-	if s.reads > 50 {
-		t.Errorf("%d reads, which went on past the failed one", s.reads)
+	// a000 to a002, a003 that fails and one more for each other worker, on
+	// each of the two listings.
+	if most := 2 * (3 + defaultConcurrency); s.reads > most {
+		t.Errorf("%d reads, more than the %d it takes to reach the failed one", s.reads, most)
 	}
+	if s.stuck.Load() {
+		t.Error("the children after the one that failed were not cancelled")
+	}
+}
+
+// orderedGet is a waitingGet whose reads of keys that sort after the failing
+// one wait for their ctx to be done, and whose other reads do not: the
+// group's own zarr.json, which sorts after its children, is read as it is.
+type orderedGet struct {
+	waitingGet
+}
+
+func (s *orderedGet) Get(ctx context.Context, key string) ([]byte, error) {
+	if err := s.read(key); err != nil {
+		return nil, err
+	}
+	if key < s.substring || key == metadataKey("") {
+		return s.Store.Get(ctx, key)
+	}
+	return s.wait(ctx, key)
 }
 
 // cancellingStore cancels a ctx on the nth read of it.

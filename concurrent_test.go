@@ -335,6 +335,12 @@ func (s *waitingGet) Get(ctx context.Context, key string) ([]byte, error) {
 	if strings.HasSuffix(key, "zarr.json") {
 		return s.Store.Get(ctx, key)
 	}
+	return s.wait(ctx, key)
+}
+
+// wait waits for ctx to be done, and gives up after a while, and says so, if
+// it never is.
+func (s *waitingGet) wait(ctx context.Context, key string) ([]byte, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
