@@ -435,6 +435,26 @@ ZARR_PYTHON=.venv/bin/python go test -run ZarrPython .
 
 Last run against zarr-python 3.4.0, numcodecs 0.17.0, numpy 2.5.3.
 
+`TestGeoPython` in `geozarr` does the same for rasters, with
+`testdata/interop/geozarr.py`: xarray and rioxarray read the rasters
+`geozarr` writes, a plain one and a sharded one with a band dimension, and
+find their CRS, transform, `x` and `y` and pixels; GDAL's Zarr driver,
+through rasterio, finds the CRS in `_CRS` and in `proj:`, each alone, and
+the geotransform in `x` and `y`. Then rioxarray writes a raster and
+`OpenRaster` reads it through its `grid_mapping`. rioxarray writes the CRS
+as WKT1, which `OpenRaster` keeps as its EPSG code; GDAL 3.12 cannot read a
+sharded array, and without `Coordinates` it finds the CRS but not the
+geotransform. It is skipped unless `GEOZARR_PYTHON` names a Python with
+`zarr`, `xarray`, `rioxarray` and `rasterio`:
+
+```sh
+.venv/bin/pip install zarr xarray rioxarray rasterio
+GEOZARR_PYTHON=.venv/bin/python go test -run GeoPython ./geozarr
+```
+
+Last run against xarray 2026.9.0, rioxarray 0.23.0, rasterio 1.5.2 with
+GDAL 3.12.2, zarr-python 3.4.1.
+
 ## Checks
 
 `make check` runs what CI runs, over all five modules - the root, `s3`,

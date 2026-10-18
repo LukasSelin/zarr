@@ -211,6 +211,29 @@ func TestOpenGridMapping(t *testing.T) {
 	}
 }
 
+func TestWKTCRS(t *testing.T) {
+	for _, c := range []struct {
+		name, wkt string
+		epsg      int
+		wkt2      bool
+	}{
+		{"WKT2", `PROJCRS["UTM 33N",BASEGEOGCRS["WGS 84",ID["EPSG",4326]],ID["EPSG",32633]]`, 32633, true},
+		{"WKT1", `PROJCS["UTM 33N",GEOGCS["WGS 84",AUTHORITY["EPSG","4326"]],AUTHORITY["EPSG","32633"]]`, 32633, false},
+		{"WKT1 without a code", `PROJCS["UTM 33N",GEOGCS["WGS 84",AUTHORITY["EPSG","4326"]]]`, 0, false},
+		{"brackets in a name", `GEOGCRS["a ]""[ b",ID["epsg",4326,URI["urn:x"]]]`, 4326, true},
+		{"another authority", `GEOGCRS["x",ID["ESRI",102100]]`, 0, true},
+		{"not WKT", "EPSG:4326", 0, false},
+	} {
+		want := CRS{EPSG: c.epsg}
+		if c.wkt2 {
+			want.WKT2 = c.wkt
+		}
+		if got := wktCRS(c.wkt); got.EPSG != want.EPSG || got.WKT2 != want.WKT2 {
+			t.Errorf("%s: %+v, not %+v", c.name, got, want)
+		}
+	}
+}
+
 func TestIngestError(t *testing.T) {
 	ctx := context.Background()
 	r, err := CreateRaster(ctx, root(t), "r", RasterOptions{

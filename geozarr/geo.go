@@ -92,6 +92,71 @@ func crsFrom(attr func(string, any) (bool, error)) (CRS, error) {
 	return c, nil
 }
 
+// wkt1 are the keywords a CRS in WKT1 starts with.
+var wkt1 = map[string]bool{
+	"PROJCS": true, "GEOGCS": true, "GEOCCS": true, "VERT_CS": true,
+	"COMPD_CS": true, "LOCAL_CS": true, "FITTED_CS": true,
+}
+
+// wktCRS is the CRS of a WKT definition: the EPSG code in the ID (WKT2) or
+// AUTHORITY (WKT1) at its top level, and the definition itself if it is
+// WKT2. rioxarray and GDAL write the crs_wkt of a grid mapping in WKT1, which
+// a CRS has no field for, so all that is kept of one is its EPSG code.
+func wktCRS(wkt string) CRS {
+	var c CRS
+	wkt = strings.TrimSpace(wkt)
+	open := strings.IndexAny(wkt, "[(")
+	if open < 0 {
+		return c
+	}
+	if !wkt1[strings.ToUpper(strings.TrimSpace(wkt[:open]))] {
+		c.WKT2 = wkt
+	}
+	// start is where the element of the top level that i is in begins, and
+	// id where the inside of a top-level ID or AUTHORITY does.
+	depth, start, id, quoted := 0, 0, -1, false
+	for i := 0; i < len(wkt); i++ {
+		switch ch := wkt[i]; {
+		case ch == '"':
+			quoted = !quoted
+		case quoted:
+		case ch == '[' || ch == '(':
+			depth++
+			if kw := strings.ToUpper(strings.TrimSpace(wkt[start:i])); depth == 2 && (kw == "ID" || kw == "AUTHORITY") {
+				id = i + 1
+			}
+			if depth == 1 {
+				start = i + 1
+			}
+		case ch == ']' || ch == ')':
+			if depth == 2 && id >= 0 {
+				if n := epsgOf(wkt[id:i]); n != 0 {
+					c.EPSG = n
+				}
+				id = -1
+			}
+			depth--
+		case ch == ',' && depth == 1:
+			start = i + 1
+		}
+	}
+	return c
+}
+
+// epsgOf is the code of the inside of an ID or AUTHORITY, `"EPSG",4326` or
+// `"EPSG","4326"`, or zero if it is not one of EPSG's.
+func epsgOf(id string) int {
+	parts := strings.SplitN(id, ",", 3)
+	if len(parts) < 2 || !strings.EqualFold(strings.Trim(strings.TrimSpace(parts[0]), `"`), "EPSG") {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.Trim(strings.TrimSpace(parts[1]), `"`))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
 func parseEPSG(code string) (int, error) {
 	rest, ok := strings.CutPrefix(strings.ToUpper(code), "EPSG:")
 	if !ok {

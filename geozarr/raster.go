@@ -42,7 +42,8 @@ type RasterOptions struct {
 	// of pixel centres and a spatial_ref array holding the CRS and the
 	// GeoTransform, as xarray, rioxarray and GDAL look for them. An array
 	// of that name already in the group is taken to be the same grid's and
-	// left alone. A rotated transform has no x and y.
+	// left alone. A rotated transform has no x and y. Without them GDAL
+	// finds the CRS but not where the pixels are, and rioxarray neither.
 	Coordinates bool
 	Attributes  map[string]any
 }
@@ -191,7 +192,9 @@ func (r *Raster) writeCoordinates(ctx context.Context, g *zarr.Group) error {
 }
 
 // OpenRaster opens the raster name in g: an array with a spatial:transform,
-// or, failing that, a GeoTransform on the array grid_mapping names.
+// or, failing that, a GeoTransform on the array grid_mapping names, as
+// rioxarray writes it. The CRS of a grid mapping in WKT1, as rioxarray writes
+// it, is read as its EPSG code alone, and not at all if it has none.
 func OpenRaster(ctx context.Context, g *zarr.Group, name string) (*Raster, error) {
 	a, err := g.OpenArray(ctx, name)
 	if err != nil {
@@ -254,9 +257,16 @@ func gridMapping(ctx context.Context, g *zarr.Group, a *zarr.Array, crs *CRS) (T
 		return Transform{}, fmt.Errorf("geozarr: GeoTransform %q is not six numbers", s)
 	}
 	if crs.IsZero() {
-		if _, err := gm.Attribute("crs_wkt", &crs.WKT2); err != nil {
-			return Transform{}, err
+		// CF's crs_wkt, or the spatial_ref GDAL wrote before CF had one.
+		var wkt string
+		for _, key := range []string{"crs_wkt", "spatial_ref"} {
+			if ok, err := gm.Attribute(key, &wkt); err != nil {
+				return Transform{}, err
+			} else if ok {
+				break
+			}
 		}
+		*crs = wktCRS(wkt)
 	}
 	return FromGDAL(gt), nil
 }
