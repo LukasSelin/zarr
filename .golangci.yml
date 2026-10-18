@@ -1,4 +1,4 @@
-# Shared by every module here: the root, s3, gcs, azblob and zstd. Run it from
+# Shared by every module here: the root, s3, gcs, azblob, zstd and geodb. Run it from
 # a module's own directory, or use `make lint`, which walks them all.
 version: "2"
 
