@@ -6,7 +6,7 @@ toolchain go1.25.13
 
 require (
 	github.com/LukasSelin/zarr v0.4.0
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 )
 
 require go.uber.org/goleak v1.3.0
