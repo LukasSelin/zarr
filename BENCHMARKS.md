@@ -226,3 +226,77 @@ Smaller things:
 - Opening something that is not there costs 4 gets, because it looks for
   version 2 metadata too. An adapter that checks whether an array exists
   pays all 4 over the network.
+
+## Against zarr-python
+
+What the [zarr-python 3 release](https://zarr.dev/blog/zarr-python-3-release/)
+timed - a write, then a read, of a float64 array of 1 GiB, of shape
+(512, 512, 512) in chunks of (512, 512, 8) - with this package beside
+zarr-python 2.18.4, which the release compared with, and zarr-python 3.4.2.
+`pycompare` runs all three on the same bytes with the same codec; its
+README says what each run does.
+
+```bash
+cd pycompare
+python compare.py --python .venv3/bin/python --python .venv2/bin/python
+```
+
+The machine was an AMD Ryzen 9 3900X (12 cores, 24 threads), Windows 11,
+64 GB, Go 1.27.1, Python 3.12.10 and numpy 2.5.4, with numcodecs 0.17.1
+under zarr-python 3 and 0.15.2 under 2. Each figure is the median of 5
+runs, in seconds; `dir` is a directory on the machine's SSD. Each library
+ran with its own default concurrency: 16 chunks at once here, 10 in
+zarr-python 3, one at a time in zarr-python 2.
+
+### random: uniform numbers from 0 to 1
+
+| store | codec | op | zarr-python 2.18.4 | zarr-python 3.4.2 | zarr (Go) | Go against 3.4.2 |
+|---|---|---|---:|---:|---:|---:|
+| memory | none | write | 1.21 | 1.25 | **0.38** | 3.3× |
+| memory | none | read | 0.69 | 0.73 | **0.40** | 1.8× |
+| memory | zstd | write | 2.84 | 1.47 | **1.00** | 1.5× |
+| memory | zstd | read | 2.05 | 0.95 | **0.94** | 1.0× |
+| dir | none | write | 1.36 | 1.15 | **0.50** | 2.3× |
+| dir | none | read | 1.64 | 1.24 | **0.58** | 2.1× |
+| dir | zstd | write | 3.39 | 1.28 | **1.06** | 1.2× |
+| dir | zstd | read | 2.93 | 1.23 | **1.08** | 1.1× |
+
+### smooth: a field measured to a tenth, with noise
+
+| store | codec | op | zarr-python 2.18.4 | zarr-python 3.4.2 | zarr (Go) | Go against 3.4.2 |
+|---|---|---|---:|---:|---:|---:|
+| memory | none | write | 1.22 | 1.26 | **0.36** | 3.5× |
+| memory | none | read | 0.69 | 0.69 | **0.38** | 1.8× |
+| memory | zstd | write | 4.83 | 1.22 | **0.94** | 1.3× |
+| memory | zstd | read | 2.40 | 0.91 | **0.85** | 1.1× |
+| dir | none | write | 1.34 | 1.00 | **0.44** | 2.3× |
+| dir | none | read | 1.64 | 0.99 | **0.54** | 1.8× |
+| dir | zstd | write | 5.07 | 1.27 | **1.00** | 1.3× |
+| dir | zstd | read | 2.88 | 1.08 | **0.88** | 1.2× |
+
+zstd stores the smooth field in 3.55 of its size here and 3.59 in
+zarr-python, at zstd's default level in both. The random data it stores at
+1.00 here and 1.07 in zarr-python: klauspost/compress keeps a block it
+cannot shrink much as it is, where libzstd entropy-codes it for 7%, so the
+random zstd rows do less work here than there. The smooth rows are the
+like-for-like ones.
+
+- **Without a codec**, this package writes 2.3 to 3.5 times faster than
+  zarr-python 3 and reads 1.8 to 2.1 times faster: 2.6 to 3.1 GB/s each way
+  in memory. zarr-python 3 is no faster than 2 in memory there; its gains
+  are where there is I/O or compression to overlap.
+- **With zstd**, it writes 1.2 to 1.5 times faster than zarr-python 3 and
+  reads about as fast, 1.0 to 1.2 times. zarr-python 3 is 2 to 4 times
+  faster than 2 there, which compresses one chunk at a time: that is the
+  thread pool the release describes, and most of what it gained.
+- A run more than a third slower than its median was nearly always a first
+  run: this package's first random runs in memory, up to 4 times the
+  median, which is a new process's first gigabyte of pages, and
+  zarr-python 3's first write to a directory. The medians leave them out.
+
+These are local stores, so they time each library's own work: copies,
+codecs and how many chunks it works on at once. The release timed S3 from
+a VM in the bucket's region, where 7.2 s to write and 3.2 s to read with
+2.18.4, and 5.4 s and 2.05 s with 3.0.0, are mostly the network.
+`compare.py --stores s3` runs the same against a bucket, or MinIO with
+`--endpoint`.

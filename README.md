@@ -464,6 +464,46 @@ GEOZARR_PYTHON=.venv/bin/python go test -run GeoPython ./geozarr
 Last run against xarray 2026.9.0, rioxarray 0.23.0, rasterio 1.5.2 with
 GDAL 3.12.2, zarr-python 3.4.1.
 
+### Speed against zarr-python
+
+`pycompare` times this package beside zarr-python 2 and 3 on the array the
+[zarr-python 3 release](https://zarr.dev/blog/zarr-python-3-release/)
+timed: a write and a read of a float64 array of 1 GiB, of shape
+(512, 512, 512) in chunks of (512, 512, 8), on the same bytes and with the
+same codec in each. The data is a field measured to a tenth, with noise on
+it, which zstd stores in about 28% of its size. Seconds, the median of 5
+runs, on an AMD Ryzen 9 3900X under Windows 11:
+
+| store | codec | op | zarr-python 2.18.4 | zarr-python 3.4.2 | zarr (Go) | Go against 3.4.2 |
+|---|---|---|---:|---:|---:|---:|
+| memory | none | write | 1.22 | 1.26 | **0.36** | 3.5× faster |
+| memory | none | read | 0.69 | 0.69 | **0.38** | 1.8× faster |
+| memory | zstd | write | 4.83 | 1.22 | **0.94** | 1.3× faster |
+| memory | zstd | read | 2.40 | 0.91 | **0.85** | 1.1× faster |
+| dir | none | write | 1.34 | 1.00 | **0.44** | 2.3× faster |
+| dir | none | read | 1.64 | 0.99 | **0.54** | 1.8× faster |
+| dir | zstd | write | 5.07 | 1.27 | **1.00** | 1.3× faster |
+| dir | zstd | read | 2.88 | 1.08 | **0.88** | 1.2× faster |
+
+Without a codec this package is 1.8 to 3.5 times as fast as zarr-python 3,
+at 2.6 to 3.1 GB/s each way in memory. With zstd it writes 1.3 times
+faster and reads 1.1 to 1.2 times faster; that is where zarr-python 3 made
+up most ground on 2, by compressing in a thread pool. Each library ran
+with its own default concurrency. These are local stores, so they time
+each library's own work; the release timed S3, where the network is most
+of it, and `pycompare` runs that too.
+
+```sh
+cd pycompare
+python -m venv .venv3 && .venv3/bin/pip install zarr numpy s3fs
+python -m venv .venv2 && .venv2/bin/pip install zarr==2.18.4 "numcodecs<0.16" numpy s3fs
+python compare.py --python .venv3/bin/python --python .venv2/bin/python
+```
+
+[pycompare/README.md](pycompare/README.md) says what each run does, and
+[BENCHMARKS.md](BENCHMARKS.md#against-zarr-python) has the uniform random
+data as well, which no codec compresses.
+
 ## Checks
 
 `make check` runs what CI runs, over all five modules - the root, `s3`,
