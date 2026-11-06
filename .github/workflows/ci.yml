@@ -14,16 +14,17 @@ permissions:
 
 env:
   # Each job that runs per module takes its Go from that module's go.mod: the
-  # toolchain line, pinned rather than 1.25.x because govulncheck reports the
-  # standard library too (1.25.13 is where the crypto/tls, crypto/x509 and
-  # net/url findings it had against 1.25.3 are fixed). So a build here and a
-  # build on a laptop are the same build, and a module whose dependencies
-  # need a newer Go - gcs and azblob need 1.26 - moves alone. The tidy job,
-  # which runs every module in one go, lets Go fetch each module's toolchain.
+  # toolchain line, a patch release rather than 1.26.x, because govulncheck
+  # reports the standard library too. Every module builds with go1.26.10,
+  # where the crypto/x509 and net/http findings govulncheck had against
+  # 1.25.13 and 1.26.9 are fixed; Go 1.25 gets no more fixes now that 1.27 is
+  # out. The go line, the oldest Go a module asks of whoever imports it, is
+  # left where the module's dependencies put it. The tidy job, which runs
+  # every module in one go, lets Go fetch each module's toolchain.
   # The fuzz job alone runs a newer Go. Before 1.27 the fuzzer sometimes
   # reports the end of -fuzztime as "context deadline exceeded" and fails a
   # run that found nothing (golang/go#75804); the fix was not backported to
-  # 1.25. What the fuzz targets test is this package, not the toolchain, and
+  # 1.26. What the fuzz targets test is this package, not the toolchain, and
   # every other job still builds with the toolchain its go.mod names.
   FUZZ_GO_VERSION: "1.27.1"
 
@@ -129,17 +130,15 @@ jobs:
         with:
           go-version-file: ${{ matrix.module }}/go.mod
           cache-dependency-path: "**/go.sum"
-      # Not golang/govulncheck-action: it sets GOTOOLCHAIN=local, and
-      # building govulncheck now asks for a newer Go than the one these
-      # modules are meant to be read with, so installing it fails outright.
-      # go run fetches what the tool itself needs, while the analysis stays
-      # on the toolchain each go.mod asks for - which is the version whose
-      # standard library we want reported. Same command as `make vuln`.
+      # Not golang/govulncheck-action: it sets GOTOOLCHAIN=local, so
+      # installing the tool fails whenever it asks for a newer Go than a
+      # module builds with. Not `go run` either: the Go it switches to in
+      # order to build the tool is the Go the scan then reads, and s3 on
+      # go1.25.13 was reported clean against go1.26.10. The script builds the
+      # tool first, scans on the Go each toolchain line names, and fails if
+      # govulncheck says it read another. Same as `make vuln`.
       - name: govulncheck
-        working-directory: ${{ matrix.module }}
-        env:
-          GOTOOLCHAIN: auto
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: scripts/vuln.sh ${{ matrix.module }}
 
   fuzz:
     name: fuzz ${{ matrix.target }}

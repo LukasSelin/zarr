@@ -27,13 +27,12 @@ lint:
 	    (cd $$m && golangci-lint run --config $(CONFIG) ./...) || exit 1; \
 	done
 
-## vuln: govulncheck over every module. It reports the standard library too,
-## so an out-of-date toolchain shows up here rather than in production.
+## vuln: govulncheck over every module, each on the Go its toolchain line
+## names, whichever Go is installed here. It reports the standard library
+## too, so an out-of-date toolchain shows up here rather than in production.
+## CI scans as Linux; GOOS=linux make vuln does the same.
 vuln:
-	@for m in $(MODULES); do \
-	    echo "==> govulncheck $$m"; \
-	    (cd $$m && go run golang.org/x/vuln/cmd/govulncheck@latest ./...) || exit 1; \
-	done
+	@bash scripts/vuln.sh $(MODULES)
 
 ## published: build and test s3, gcs, azblob, zstd and geodb against the core their go.mod
 ## requires, with the replace dropped, as a consumer gets them. It fails if a
