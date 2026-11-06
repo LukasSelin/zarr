@@ -1,6 +1,6 @@
-# Everything CI runs, runnable here. MODULES is the six modules of this
+# Everything CI runs, runnable here. MODULES is the seven modules of this
 # repository; each is built, tested and linted on its own.
-MODULES := . s3 gcs azblob zstd geodb
+MODULES := . s3 gcs azblob zstd geodb pycompare
 
 GOLANGCI_VERSION := v2.13.2
 CONFIG := $(abspath .golangci.yml)

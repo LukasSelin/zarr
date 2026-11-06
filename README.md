@@ -464,6 +464,12 @@ GEOZARR_PYTHON=.venv/bin/python go test -run GeoPython ./geozarr
 Last run against xarray 2026.9.0, rioxarray 0.23.0, rasterio 1.5.2 with
 GDAL 3.12.2, zarr-python 3.4.1.
 
+`pycompare` times this package beside zarr-python 2 and 3 on the array the
+zarr-python 3 release timed: a write and a read of 1 GiB of float64, on the
+same bytes and with the same codec in each. See
+[pycompare/README.md](pycompare/README.md), and
+[BENCHMARKS.md](BENCHMARKS.md#against-zarr-python) for the results.
+
 ## Checks
 
 `make check` runs what CI runs, over all five modules - the root, `s3`,

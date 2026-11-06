@@ -1,5 +1,8 @@
 __pycache__/
-.venv/
+.venv*/
+pycompare/out/
+pycompare/pycompare
+pycompare/pycompare.exe
 *.test
 *.test.exe
 *.zarr/
