@@ -2,7 +2,7 @@ module github.com/LukasSelin/zarr/geodb
 
 go 1.23
 
-toolchain go1.25.13
+toolchain go1.26.10
 
 require github.com/LukasSelin/zarr v0.4.0
 

@@ -163,9 +163,7 @@ idempotent, which a `Set` is: give the handle
 `Retryer(storage.WithPolicy(storage.RetryAlways))` to have one retried. An
 object stored with `Content-Encoding: gzip` is served whole whatever range
 is asked for, so a range of it is an error: store shards without it. The
-module needs Go 1.25, as `cloud.google.com/go/storage` does; v1.69 and
-later ask for 1.26, so it is held at v1.68 while this repository builds with
-1.25.
+module needs Go 1.26, as `cloud.google.com/go/storage` does from v1.69.
 
 ## Stores in Azure Blob Storage
 
@@ -185,7 +183,8 @@ and then of the range, asked for on condition that the blob is still the
 one the properties were of. A chunk in a shard is one request. A
 `BlobNotFound` is `ErrNotFound`; a `ContainerNotFound` is an error. A
 `Delete` takes a blob's snapshots with it, as Blob Storage will not delete
-one without them. The module needs Go 1.25, as the SDK does.
+one without them. The module needs Go 1.26, as `golang.org/x/net` v0.60.0
+under the SDK does: it has the fixes govulncheck asks for.
 
 ## Stores over HTTP
 
@@ -514,7 +513,7 @@ data as well, which no codec compresses.
 | `make fmt-check` | gofmt, in every module |
 | `make lint` | golangci-lint, configured by `.golangci.yml` at the root |
 | `make test` | `go test -race`, every module |
-| `make vuln` | govulncheck, against the modules and the standard library |
+| `make vuln` | govulncheck, against the modules and the standard library of the Go each `toolchain` line names |
 | `make fuzz` | each fuzz target for `FUZZTIME`, 30s by default |
 | `make tidy` | `go mod tidy` in each module |
 | `make published` | `s3`, `gcs`, `azblob` and `zstd` built and tested as a consumer gets them: without their `replace`, against the tag of the core they require |
@@ -544,10 +543,13 @@ what it touched while it did.
 
 govulncheck reports the standard library as well as the modules, so a Go
 toolchain behind on its patch releases shows up as a finding of its own.
-Each `go.mod` asks for `go1.25.13` by its `toolchain` line and CI pins the
-same, so a build here and a build on a laptop are the same build; the
+Each `go.mod` asks for `go1.26.10` by its `toolchain` line. CI builds,
+tests and scans each module with that Go, and `make vuln` scans with it
+whatever Go is installed, so the standard library reported is the one CI
+builds with. Go 1.25 gets no more fixes now that 1.27 is out. The
 `toolchain` line is ignored in a module that is not the main one, so it
-asks nothing of anyone who imports this. The fuzz job alone runs Go 1.27.1:
+asks nothing of anyone who imports this; the `go` line, the oldest Go a
+module needs, is what they get. The fuzz job alone runs Go 1.27.1:
 before it, the fuzzer can fail a run that found nothing
 ([golang/go#75804](https://github.com/golang/go/issues/75804)). CI runs the scan weekly as well as
 on every push, because a vulnerability is usually published long after the
