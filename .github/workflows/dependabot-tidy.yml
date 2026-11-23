@@ -1,0 +1,85 @@
+name: dependabot tidy
+
+# pycompare builds s3 and zstd from this repository by replace, so when
+# Dependabot bumps aws-sdk in /s3 or klauspost/compress in /zstd, what
+# pycompare requires goes up too. Dependabot edits only the directory it
+# bumps, so its pull request fails the tidy job in ci.yml, and pycompare's
+# build, lint, scan and test with it, on a go.sum that lacks the new versions.
+# This runs `make tidy` on Dependabot's branch, the same go mod tidy over
+# every module that the tidy job checks, and pushes what it changes.
+#
+# Listing /pycompare in dependabot.yml would not be enough. pycompare requires
+# klauspost/compress only indirectly, and Dependabot leaves indirect
+# requirements alone. And a pycompare that Dependabot bumps beside s3 is tidy
+# only if Dependabot works it out against the s3 it has just bumped, which
+# nothing here can check before it happens.
+
+on:
+  pull_request:
+    paths:
+      - "**/go.mod"
+      - "**/go.sum"
+
+permissions:
+  contents: read
+
+jobs:
+  tidy:
+    name: tidy the modules Dependabot left
+    # The actor rather than the pull request's author, so that a push to
+    # Dependabot's branch by anyone else, this job's own included, is left as
+    # it is.
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    # If Dependabot pushes again while this runs, this run's push would fail
+    # on a branch that has moved, and the new push starts a run of its own.
+    concurrency:
+      group: dependabot-tidy-${{ github.head_ref }}
+      cancel-in-progress: true
+    # A run that Dependabot starts gets a read-only token unless the workflow
+    # asks for more. This one pushes with it when DEPENDABOT_TIDY_TOKEN is not
+    # set.
+    permissions:
+      contents: write
+    steps:
+      # The push is made with the token checkout keeps. After a push made
+      # with GITHUB_TOKEN, the pull_request runs for the new commit wait until
+      # someone with write access selects "Approve workflows to run" on the
+      # pull request. After a push made with DEPENDABOT_TIDY_TOKEN, they start
+      # on their own. That is a Dependabot secret (Actions secrets are not
+      # given to Dependabot's runs) holding a fine-grained token with
+      # read-and-write Contents on this repository. Starting ci.yml by
+      # workflow_dispatch instead would not help: its checks do not show on
+      # the pull request, so the required ones would never be met.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.DEPENDABOT_TIDY_TOKEN || github.token }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
+      # MODULES in the Makefile, in the order ci.yml tidies them: each module
+      # after the ones it replaces, so one pass is enough.
+      - name: go mod tidy every module
+        env:
+          GOTOOLCHAIN: auto
+        run: make tidy
+      # Dependabot stops rebasing a pull request once someone else has pushed
+      # to it, unless their commit message says [dependabot skip]. With it,
+      # Dependabot goes on rebasing and force-pushes over this commit, and its
+      # push starts this workflow again.
+      - name: push what tidy changed
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          git add -A -- '*go.mod' '*go.sum'
+          if git diff --cached --quiet; then
+            echo "every module was already tidy"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "[dependabot skip] go mod tidy every module" \
+            -m "Dependabot bumped one module. The modules that build it by replace now require what it requires."
+          git push origin "HEAD:$BRANCH"
