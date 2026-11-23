@@ -15,9 +15,9 @@ permissions:
 env:
   # Each job that runs per module takes its Go from that module's go.mod: the
   # toolchain line, a patch release rather than 1.26.x, because govulncheck
-  # reports the standard library too. Every module builds with go1.26.10,
-  # where the crypto/x509 and net/http findings govulncheck had against
-  # 1.25.13 and 1.26.9 are fixed; Go 1.25 gets no more fixes now that 1.27 is
+  # reports the standard library too. Every module builds with go1.26.11,
+  # where the net/http finding govulncheck had against 1.26.10
+  # (GO-2026-6859) is fixed; Go 1.25 gets no more fixes now that 1.27 is
   # out. The go line, the oldest Go a module asks of whoever imports it, is
   # left where the module's dependencies put it. The tidy job, which runs
   # every module in one go, lets Go fetch each module's toolchain.

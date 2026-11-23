@@ -543,7 +543,7 @@ what it touched while it did.
 
 govulncheck reports the standard library as well as the modules, so a Go
 toolchain behind on its patch releases shows up as a finding of its own.
-Each `go.mod` asks for `go1.26.10` by its `toolchain` line. CI builds,
+Each `go.mod` asks for `go1.26.11` by its `toolchain` line. CI builds,
 tests and scans each module with that Go, and `make vuln` scans with it
 whatever Go is installed, so the standard library reported is the one CI
 builds with. Go 1.25 gets no more fixes now that 1.27 is out. The
