@@ -1,6 +1,9 @@
 # govulncheck finds what is already known to be broken; this keeps the
 # modules current so there is less of it to find. Each module is updated on
-# its own, as each has its own go.mod.
+# its own, as each has its own go.mod. pycompare and geodb are not listed:
+# they build the modules beside them by replace, and
+# .github/workflows/dependabot-tidy.yml tidies them on the pull request that
+# bumps one of those.
 version: 2
 updates:
   - package-ecosystem: gomod
