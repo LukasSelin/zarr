@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/storage v1.71.0
 	github.com/LukasSelin/zarr v0.3.0
 	go.uber.org/goleak v1.3.0
-	google.golang.org/api v0.312.0
+	google.golang.org/api v0.316.0
 )
 
 require (
